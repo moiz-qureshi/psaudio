@@ -11,6 +11,7 @@ umask 022
 mkdir -p "$APP" "$CONF" "$(dirname "$UNIT")" "$HOME/.local/bin" "$HOME/.local/state/psaudio-buddy/test"
 # keep the previous version for rollback
 [ -f "$APP/buddy.py" ] && cp -a "$APP/buddy.py" "$APP/buddy.py.prev"
+[ -f "$APP/local_backend.py" ] && cp -a "$APP/local_backend.py" "$APP/local_backend.py.prev"
 [ -f "$UNIT" ] && cp -a "$UNIT" "$UNIT.prev"
 [ -d "$APP/.venv" ] || python3 -m venv "$APP/.venv"
 "$APP/.venv/bin/pip" install -q --require-virtualenv -r requirements.lock
@@ -21,6 +22,7 @@ if [ ! -d "$APP/models/$M" ]; then
   python3 -m zipfile -e "/tmp/$M.zip" "$APP/models/" && rm -f "/tmp/$M.zip"
 fi
 install -m 755 buddy.py "$APP/buddy.py"
+install -m 644 local_backend.py "$APP/local_backend.py"
 install -m 644 requirements.lock "$APP/requirements.lock"
 install -m 755 buddy-key "$HOME/.local/bin/buddy-key"
 install -m 644 psaudio-buddy.service "$UNIT"

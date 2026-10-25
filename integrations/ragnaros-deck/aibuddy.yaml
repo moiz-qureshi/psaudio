@@ -15,6 +15,8 @@ recognize:
   - {pattern: 'bin/aibuddy vol up', action: vol_up}
   - {pattern: 'bin/aibuddy vol down', action: vol_down}
   - {pattern: 'bin/aibuddy mic$', action: mic}
+  - {pattern: 'bin/aibuddy model next$', action: model_next}
+  - {pattern: 'bin/aibuddy model (?P<profile>[a-z0-9_-]+)$', action: model_set}
 
 actions:
   - id: talk
@@ -74,3 +76,19 @@ actions:
     description: Toggle the headset mic to the PS5 using the Pi's real mute state
     for: [key, press, touch]
     command: /home/opti3/.config/ragnaros/bin/aibuddy mic
+  - id: model_next
+    name: "AI model: next"
+    emoji: 🔁
+    description: Cycle the AI model profiles (Gemini / local MacBook models) — edit them on the AI page
+    for: [key, press, touch, swipe]
+    icon: icons/aimodel.png
+    command: /home/opti3/.config/ragnaros/bin/aibuddy model next
+  - id: model_set
+    name: "AI model: set"
+    emoji: 🧠
+    description: Switch to one AI model profile
+    for: [key, press, touch]
+    icon: icons/aimodel.png
+    params:
+      - {id: profile, label: Model profile, type: select, required: true, options_from: {url: /api/aibuddy/_options}}
+    command: /home/opti3/.config/ragnaros/bin/aibuddy model {{profile|sh}}

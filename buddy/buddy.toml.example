@@ -13,7 +13,7 @@ hold_threshold_s = 0.35          # held longer than this = hold-to-talk; shorter
 max_reply_s = 25                 # longest spoken reply played; longer is cut and cancelled
 max_output_tokens = 1200         # hard cap on generation
 preroll_ms = 200                 # audio kept (in memory only) from just before the press
-context_trigger_tokens = 12000   # sliding-window compression keeps history (and cost per turn) bounded
+context_trigger_tokens = 6000    # sliding-window compression: Live re-bills the whole context every turn, so keep it small
 
 # which nodes to use - check with:  pactl list short sources / sinks
 mic_source   = "alsa_input.usb-Logitech_A50_X-00.mono-fallback"

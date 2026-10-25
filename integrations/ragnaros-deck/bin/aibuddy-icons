@@ -100,4 +100,14 @@ tile("aisession_off", "AI SESSION", "OFF", GREY, power)
 tile("aisession_on", "AI SESSION", "ON", GREEN, power)
 tile("aivol_down", "AI VOL", "DOWN", VIOLET, minus)
 tile("aivol_up", "AI VOL", "UP", VIOLET, plus)
+
+
+def brain(d, c):
+    d.ellipse((34, 32, 78, 76), outline=c, width=4)
+    d.line((56, 34, 56, 74), fill=c, width=3)
+    d.arc((40, 40, 56, 56), 90, 270, fill=c, width=3)
+    d.arc((56, 52, 72, 68), 270, 90, fill=c, width=3)
+
+
+tile("aimodel", "AI MODEL", "NEXT", AMBER, brain)
 print("icons written to", OUT)

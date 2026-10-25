@@ -1,9 +1,17 @@
 # psaudio-buddy — Gemini voice buddy ("Hasaan") for the PS Audio Bridge
 
-Talk to Gemini from the deck or by saying **"Hey Hasaan"**. The spoken reply
+Talk to an AI from the deck or by saying **"Hey Hasaan"**. The spoken reply
 plays in the A50 X headset **and** goes out on the PS5 microphone, so the squad
-hears it. Built on the Gemini Live API (native audio in/out, model
-`gemini-3.8-live`); there is no speech-to-text → LLM → TTS chain.
+hears it. Two kinds of model, switchable live (Deck Manager → **AI** page, or the
+*AI model: next / set* deck actions):
+
+- **Gemini Live** (`gemini-3.8-live`): native streaming audio in and out, no
+  STT → LLM → TTS chain. Fastest (~0.75 s to first words). Google voices only.
+- **Local, on the MacBook through oMLX**: Whisper → any chat model you pick
+  (e.g. the uncensored Qwen) streamed → Kokoro, a voice cloned from your own
+  recording (Qwen3-TTS), or your macOS Personal Voice (HasaanVoice app),
+  spoken phrase by phrase while the model is still writing (~1.4–1.6 s). Free,
+  private, but the Mac has to be awake.
 
 The service only *adds* streams to PipeWire: one capture on the headset mic,
 one on the PS5 incoming mix (wake word only), and one playback stream per
@@ -37,17 +45,49 @@ soundboard keep working.
 Your mic muted to the PS5 also mutes it for the buddy: the key shows
 "mic muted", and the wake word can't hear you.
 
+## Model profiles (Deck Manager → AI)
+
+Stored on the Pi in `~/.config/psaudio-buddy/profiles.json`, edited from the AI
+page (`/api/aibuddy/*` in Deck Manager, a token-holding proxy) or the Pi API.
+Each profile is `gemini` (model, voice) or `local` (oMLX URL, chat model,
+speech-to-text model, voice source, temperature, max reply tokens, remembered
+turns, language, extra instruction). Shipped profiles: *Gemini 3.8 Live*,
+*Local · Qwen uncensored* (Kokoro voice), *Local · my cloned voice*
+(Qwen3-TTS + your recording), *Local · macOS Personal Voice*. Switching
+replaces the connection; the keys, wake word and STOP behave the same for all.
+
+**Your voice, two ways**
+- *Cloned:* AI page → **My voice** → put the headset on, unmute the mic,
+  press **Record** and read the script (12 s). Whisper writes the transcript.
+  The recording stays in `~/.config/psaudio-buddy/voices/` on the Pi (mode
+  700) and is sent to the Mac as the reference on each phrase. Delete it there
+  any time.
+- *macOS Personal Voice:* `integrations/macos-voice/` builds **HasaanVoice.app**
+  on the Mac (`./build.sh`). It serves `/speak` on :8891 with a token (copied to
+  the Pi as `MAC_VOICE_TOKEN`). macOS has to allow it (System Settings →
+  Accessibility → Personal Voice → *Allow applications to request to use*, then
+  Allow). Until macOS lists a Personal Voice to apps, it speaks with Samantha
+  and the AI page says so.
+
+**Local latency work** (all measured): Whisper gets a fixed language and plain
+text output (−0.25 s). The Mac's GPU slows after ~2 s idle (+0.7 s per
+request), so while someone is talking the Pi sends one chat request with the
+real prompt (which also warms oMLX's prefix cache), then a one-letter Kokoro
+request every second. The first spoken chunk breaks at the first clause.
+Cloned-voice audio is streamed from oMLX and played as it arrives.
+
 ## Files
 
 On the Pi (user `psaudio`, no root needed):
 
 | Path | What |
 |---|---|
-| `~/.local/lib/psaudio-buddy/buddy.py` | the service (`buddy.py.prev` is the previous version) |
+| `~/.local/lib/psaudio-buddy/buddy.py`, `local_backend.py` | the service + local backend/profiles (`*.prev` = previous version) |
+| `~/.config/psaudio-buddy/profiles.json`, `voices/` | model profiles; your voice recordings (local cloning) |
 | `~/.local/lib/psaudio-buddy/.venv`, `requirements.lock` | pinned dependencies (`google-genai`, `aiohttp`, `numpy`, `vosk`) |
 | `~/.local/lib/psaudio-buddy/models/vosk-model-small-en-us-0.15` | offline wake-word model (Apache-2.0) |
 | `~/.config/psaudio-buddy/buddy.toml` | settings: model, voice, volume, timeouts, reply length, wake word, limits |
-| `~/.config/psaudio-buddy/secrets.env` (600) | `GEMINI_API_KEY`, `BUDDY_TOKEN` |
+| `~/.config/psaudio-buddy/secrets.env` (600) | `GEMINI_API_KEY`, `BUDDY_TOKEN`, `OMLX_API_KEY`, `MAC_VOICE_TOKEN` |
 | `~/.config/systemd/user/psaudio-buddy.service` | the user unit (`Restart=always`) |
 | `~/.local/state/psaudio-buddy/usage.json`, `latency.jsonl` | daily usage counters; per-turn timings (no audio, no text) |
 
@@ -81,6 +121,9 @@ and the client IP must be in `allow` (127.0.0.1 and opti3 by default).
 `GET /health` is open but only returns the state.
 
 `POST /press` `/release` `/talk/start` `/talk/end` `/stop` `/toggle` `/arm` `/disarm` `/volume?up=N|down=N|set=N`;
+`GET /profiles`, `PUT|DELETE /profiles/{id}`, `POST /profiles/{id|next}/use`, `GET /catalog`
+(models/voices available right now); `GET /voices`, `POST /voices/{name}/record?seconds=N`,
+`PUT /voices/{name}` (WAV body), `DELETE /voices/{name}`;
 `GET /status?since=SEQ&wait=25` (long-poll: state, latest question and reply
 transcripts, mic mute, wake info, usage); `GET /history` (per-turn timings).
 
@@ -104,10 +147,15 @@ cap the key shows an error until the next day.
 | Hand-off → audio in the PS5-mic sink mix | +50–120 ms | |
 | Wake word: end of speech → turn sent | 554 ms | 576 ms |
 | Wake word: end of speech → first audio | 1.24 s | 1.91 s |
+| Local Qwen + Kokoro: release → first audio | 1.36–1.75 s | 2.07 s |
+| Local Qwen + cloned voice: release → first audio | 1.55 s | 1.95 s |
 
 These are Pi-side software numbers. The A50 X wireless link adds its own
 delay, the PS5/PSN path to friends adds more, and audible latency was not
 measured. Nearly all of the remaining time is Gemini's own time to first audio.
+
+`testmode.sh on|off` on the Pi points the buddy at virtual inputs and a null
+sink, so tests are silent for you and the squad.
 
 ## Disable / roll back
 

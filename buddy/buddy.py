@@ -46,6 +46,9 @@ except ImportError:  # the control API still answers; every turn reports the err
 
 log = logging.getLogger("buddy")
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import local_backend  # noqa: E402
+
 CONFIG_PATH = pathlib.Path(os.environ.get(
     "BUDDY_CONFIG", "~/.config/psaudio-buddy/buddy.toml")).expanduser()
 STATE_DIR = pathlib.Path(os.environ.get(
@@ -62,7 +65,7 @@ DEFAULTS = {
     "max_reply_s": 25,           # playback is cut (and the turn cancelled) past this
     "max_output_tokens": 1200,
     "preroll_ms": 300,           # audio kept (memory only) from just before the press / wake word
-    "context_trigger_tokens": 12000,   # sliding-window compression bounds history
+    "context_trigger_tokens": 6000,   # sliding-window compression bounds history
     "system_instruction": (
         "You are the squad's AI gaming buddy. Speak casually and naturally. "
         "Default to one or two short sentences. Be witty when appropriate and "
@@ -120,6 +123,8 @@ def load_config():
                 cfg[k] = v
     cfg["api_key"] = os.environ.get("GEMINI_API_KEY", "").strip()
     cfg["token"] = os.environ.get("BUDDY_TOKEN", "").strip()
+    cfg["omlx_key"] = os.environ.get("OMLX_API_KEY", "").strip()
+    cfg["mac_voice_token"] = os.environ.get("MAC_VOICE_TOKEN", "").strip()
     return cfg
 
 
@@ -144,16 +149,23 @@ class Usage:
             self.data = {"day": day, "turns": 0, "audio_in_s": 0.0,
                          "tokens": {"in_audio": 0, "in_text": 0, "out_audio": 0,
                                     "out_text": 0, "total": 0}}
+        # automated test turns are kept apart and never count toward the limits
+        self.data.setdefault("test_tokens", {"in_audio": 0, "in_text": 0, "out_audio": 0,
+                                             "out_text": 0, "total": 0})
+        self.data.setdefault("test_turns", 0)
         return self.data
 
-    def add_turn(self, audio_in_s):
+    def add_turn(self, audio_in_s, test=False):
         d = self.today()
-        d["turns"] += 1
-        d["audio_in_s"] = round(d["audio_in_s"] + audio_in_s, 2)
+        if test:
+            d["test_turns"] += 1
+        else:
+            d["turns"] += 1
+            d["audio_in_s"] = round(d["audio_in_s"] + audio_in_s, 2)
         self.save()
 
-    def add_usage(self, um):
-        d = self.today()["tokens"]
+    def add_usage(self, um, test=False):
+        d = self.today()["test_tokens" if test else "tokens"]
 
         def split(details, prefix):
             seen = 0
@@ -172,18 +184,18 @@ class Usage:
         d["total"] += um.total_token_count or 0
         self.save()
 
-    def estimated_usd(self):
-        t = self.today()["tokens"]
+    def estimated_usd(self, bucket="tokens"):
+        t = self.today()[bucket]
         return round(sum(t[k] * self.prices.get(k, 0) for k in
                          ("in_audio", "in_text", "out_audio", "out_text")) / 1e6, 4)
 
-    def over_limit(self, limits):
+    def over_limit(self, limits, paid=True):
         d = self.today()
         if d["turns"] >= limits["max_turns_per_day"]:
             return "daily turn limit reached"
         if d["audio_in_s"] >= limits["max_audio_in_s_per_day"]:
             return "daily listening limit reached"
-        if self.estimated_usd() >= limits["max_estimated_usd_per_day"]:
+        if paid and self.estimated_usd() >= limits["max_estimated_usd_per_day"]:
             return "daily cost limit reached (estimate)"
         return None
 
@@ -513,6 +525,8 @@ class Buddy:
         self.cfg = cfg
         STATE_DIR.mkdir(parents=True, exist_ok=True)
         self.usage = Usage(STATE_DIR / "usage.json", cfg["price_per_mtok"])
+        self.profiles = local_backend.Profiles(CONFIG_PATH.parent / "profiles.json", cfg)
+        self.local_history = collections.deque(maxlen=12)   # bounded local conversation
         self.player = Player(cfg)
         self.player.on_first = self._first_played
         self.player.on_drained = self._drained
@@ -576,7 +590,8 @@ class Buddy:
             "wake": {"enabled": bool(self.cfg["wake"]["enabled"]),
                      "active": {k: (not d.paused) for k, d in self.detectors.items()},
                      "last": self.last_wake},
-            "model": self.cfg["model"], "voice": self.cfg["voice"],
+            "profile": {k: self.profile.get(k) for k in ("id", "label", "kind")},
+            "model": self.model_name(), "voice": self.voice_name(),
             "ai_volume": self.cfg["ai_volume"], "mic_muted": self.mic_is_muted,
             "question": self.question, "reply": self.reply,
             "last_turn": self.history[-1] if self.history else None,
@@ -584,13 +599,55 @@ class Buddy:
             "usage": {"day": u["day"], "turns": u["turns"], "audio_in_s": u["audio_in_s"],
                       "provider_tokens": u["tokens"],
                       "estimated_usd": self.usage.estimated_usd(),
+                      "test_turns": u["test_turns"], "test_tokens": u["test_tokens"],
+                      "test_estimated_usd": self.usage.estimated_usd("test_tokens"),
                       "note": "tokens are provider-reported; USD is an estimate, not billing"},
             "limits": self.cfg["limits"],
         }
 
     # -- session -------------------------------------------------------------
+    @property
+    def profile(self):
+        return self.profiles.active
+
+    def model_name(self):
+        p = self.profile
+        return p["model"] if p["kind"] == "gemini" else p["llm"]
+
+    def voice_name(self):
+        p = self.profile
+        if p["kind"] == "gemini":
+            return p["voice"]
+        return "macOS Personal Voice" if p["tts_provider"] == "macos" else f'{p["tts_model"]}:{p["tts_voice"]}'
+
+    async def use_profile(self, pid):
+        """Switch model profile; an open connection is replaced, the wake word keeps going."""
+        self.profiles.use(pid)
+        self.resume_handle = None
+        log.info("profile -> %s (%s)", pid, self.model_name())
+        if self.listening:
+            await self._end_listen(submit=False)
+        self.player.stop()
+        if self.session_task and not self.session_task.done():
+            self.session_task.cancel()
+            try:
+                await self.session_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self.session_task = None
+            self.session_ready.clear()
+            self.armed = False
+            await self.arm()
+        elif self.state == "error":
+            await self.set_state("ready" if self.session_on else "off")
+        self.bump()
+
+    def _stage(self, name):
+        if self.turn is not None and name not in self.turn:
+            self.turn[name] = now_ms()
+
     def live_config(self):
-        c = self.cfg
+        c = dict(self.cfg, voice=self.profile["voice"])
         return types.LiveConnectConfig(
             response_modalities=["AUDIO"],
             system_instruction=c["system_instruction"],
@@ -611,11 +668,15 @@ class Buddy:
         self.last_use = time.monotonic()
         if self.armed and self.session_task and not self.session_task.done():
             return
-        if genai is None:
+        gemini = self.profile["kind"] == "gemini"
+        if gemini and genai is None:
             await self.set_state("error", "google-genai not installed")
             return
-        if not self.cfg["api_key"]:
+        if gemini and not self.cfg["api_key"]:
             await self.set_state("error", "no GEMINI_API_KEY in secrets.env")
+            return
+        if not gemini and not self.cfg["omlx_key"]:
+            await self.set_state("error", "no OMLX_API_KEY in secrets.env")
             return
         self.armed = True
         self.player.stop()
@@ -686,23 +747,30 @@ class Buddy:
         if self.state != "error":
             await self.set_state("off")
 
+    def _connect(self, client):
+        p = self.profile
+        if p["kind"] == "local":
+            return local_backend.LocalSession(self.cfg, p, self.local_history, self._stage)
+        return client.aio.live.connect(model=p["model"], config=self.live_config())
+
     async def _session_loop(self):
-        client = genai.Client(api_key=self.cfg["api_key"])
+        client = genai.Client(api_key=self.cfg["api_key"]) if genai and self.cfg["api_key"] else None
         backoff = 1.0
         while self.armed:
             if self.state not in ("listening",):
                 await self.set_state("connecting")
             try:
                 t = time.monotonic()
-                async with client.aio.live.connect(model=self.cfg["model"],
-                                                   config=self.live_config()) as session:
+                async with self._connect(client) as session:
                     self.session = session
                     self.discard = self.gen_active = False
                     if self.activity_open and not self.listening:
                         self.activity_open = False
                     self.session_ready.set()
-                    log.info("connected to %s in %.0f ms", self.cfg["model"],
-                             (time.monotonic() - t) * 1000)
+                    log.info("connected to %s (%s) in %.0f ms", self.model_name(),
+                             self.profile["id"], (time.monotonic() - t) * 1000)
+                    if hasattr(session, "warm"):
+                        asyncio.create_task(session.warm())
                     backoff = 1.0
                     if self.state in ("connecting", "error"):
                         await self.set_state("ready")
@@ -734,12 +802,21 @@ class Buddy:
 
     def _describe(self, e):
         text = str(e)
+        if self.profile["kind"] == "local":
+            import httpx
+            if isinstance(e, LookupError):
+                return text[:160], True
+            if isinstance(e, httpx.HTTPStatusError) and e.response.status_code in (401, 403):
+                return "oMLX refused the API key", True
+            if isinstance(e, (httpx.ConnectError, httpx.ConnectTimeout, OSError)):
+                return "MacBook / oMLX unreachable", False
+            return f"local: {text[:150]}", False
         code = getattr(e, "code", None) or getattr(e, "status_code", None)
         low = text.lower()
         if "api key" in low or "api_key_invalid" in low or code in (401, 403) or "1008" in low and "key" in low:
             return "invalid or unauthorised API key", True
         if "not found" in low or "not supported" in low and "model" in low or code == 404:
-            return f"model {self.cfg['model']} unavailable", True
+            return f"model {self.model_name()} unavailable", True
         if code == 429 or "quota" in low or "resource_exhausted" in low or "rate" in low and "limit" in low:
             return "rate limited / quota exhausted", False
         if isinstance(e, (OSError, asyncio.TimeoutError)) or "connect" in low or "dns" in low:
@@ -778,8 +855,8 @@ class Buddy:
             self.resume_handle = msg.session_resumption_update.new_handle
         if msg.go_away:
             log.info("go_away, %s left", msg.go_away.time_left)
-        if msg.usage_metadata:
-            self.usage.add_usage(msg.usage_metadata)
+        if msg.usage_metadata and self.profile["kind"] == "gemini":
+            self.usage.add_usage(msg.usage_metadata, test=bool(self.turn and self.turn.get("test")))
         sc = msg.server_content
         if not sc:
             return
@@ -897,7 +974,7 @@ class Buddy:
         self.last_use = time.monotonic()
         if self.listening:
             return
-        why = self.usage.over_limit(self.cfg["limits"])
+        why = self.usage.over_limit(self.cfg["limits"], paid=self.profile["kind"] == "gemini")
         if why:
             await self.set_state("error", why)
             return
@@ -913,7 +990,8 @@ class Buddy:
                 return
         self.question, self.reply = "", ""
         self.turn = {"press_ms": client_ms or now_ms(), "press_rx_ms": now_ms(),
-                     "model": self.cfg["model"], "connected_at_press": self.session_ready.is_set()}
+                     "model": self.model_name(), "profile": self.profile["id"],
+                     "connected_at_press": self.session_ready.is_set()}
         self.listening, self.listen_bytes = True, 0
         self.listen_source = source
         self.listen_started = time.monotonic()
@@ -963,7 +1041,8 @@ class Buddy:
             self._queue(("end", None))
             self.activity_open = False
             self.gen_active = True
-            self.usage.add_turn(self.listen_bytes / (IN_RATE * 2))
+            self.usage.add_turn(self.listen_bytes / (IN_RATE * 2),
+                                test=bool(self.turn and self.turn.get("test")))
             await self.set_state("thinking")
             if not self.session_ready.is_set():
                 asyncio.create_task(self._connect_watchdog())
@@ -1096,6 +1175,7 @@ class Buddy:
         await self.start_listen(source="file")
         if not self.listening:
             return None
+        self.turn["test"] = True
         t0 = time.monotonic()
         for i in range(0, len(data), IN_CHUNK):
             if not self.listening:
@@ -1217,10 +1297,132 @@ def make_app(b: Buddy):
         secs = await b.feed_file(p)
         return web.json_response({"ok": True, "fed_s": secs, **b.status()})
 
+    async def profiles_get(r):
+        return web.json_response({"ok": True, "active": b.profile["id"], "profiles": b.profiles.list()})
+
+    async def profile_put(r):
+        try:
+            prof = b.profiles.put(r.match_info["pid"], await r.json())
+        except (ValueError, KeyError) as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=400)
+        local_backend._catalog_cache.clear()
+        if prof["id"] == b.profile["id"]:
+            await b.use_profile(prof["id"])          # reconnect with the edited settings
+        return web.json_response({"ok": True, "profile": prof})
+
+    async def profile_delete(r):
+        pid = r.match_info["pid"]
+        was_active = pid == b.profile["id"]
+        try:
+            b.profiles.delete(pid)
+        except KeyError:
+            return web.json_response({"ok": False, "error": "no such profile"}, status=404)
+        except ValueError as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=400)
+        if was_active:
+            await b.use_profile(b.profile["id"])
+        return web.json_response({"ok": True})
+
+    async def profile_use(r):
+        pid = r.match_info["pid"]
+        if pid == "next":
+            pid = b.profiles.next_id()
+        if not b.profiles.get(pid):
+            return web.json_response({"ok": False, "error": "no such profile"}, status=404)
+        await b.use_profile(pid)
+        return await ok()
+
+
+    async def voices_get(r):
+        return web.json_response({"ok": True, "voices": local_backend.list_voices()})
+
+    async def _transcribe(wav_bytes):
+        import httpx
+        prof = b.profile if b.profile["kind"] == "local" else {**local_backend.LOCAL_DEFAULTS}
+        async with httpx.AsyncClient(timeout=30) as c:
+            res = await c.post(prof["base_url"].rstrip("/") + "/audio/transcriptions",
+                               headers={"Authorization": f"Bearer {cfg['omlx_key']}"},
+                               files={"file": ("v.wav", wav_bytes, "audio/wav")},
+                               data={"model": prof.get("stt", "whisper-large-v3-turbo"), "response_format": "text",
+                                     "language": prof.get("language") or "en"})
+            res.raise_for_status()
+            t = res.text.strip()
+            return (json.loads(t).get("text", "") if t.startswith("{") else t).strip()
+
+    async def _save_voice(name, wav_bytes, text):
+        import io as _io, wave as _wave
+        with _wave.open(_io.BytesIO(wav_bytes)) as w:
+            if w.getsampwidth() != 2:
+                raise ValueError("need 16-bit WAV")
+            secs = w.getnframes() / w.getframerate()
+        if not 3 <= secs <= 30:
+            raise ValueError(f"recording is {secs:.1f}s; use 5-20 s of clear speech")
+        if not text:
+            text = await _transcribe(wav_bytes)
+        local_backend.VOICES_DIR.mkdir(parents=True, exist_ok=True)
+        os.chmod(local_backend.VOICES_DIR, 0o700)
+        (local_backend.VOICES_DIR / f"{name}.wav").write_bytes(wav_bytes)
+        (local_backend.VOICES_DIR / f"{name}.txt").write_text(text)
+        local_backend._catalog_cache.clear()
+        return {"name": name, "seconds": round(secs, 1), "text": text}
+
+    async def voice_record(r):
+        """Record your voice from the headset mic (memory only until saved here)."""
+        import io as _io, wave as _wave
+        name = r.match_info["name"]
+        secs = max(5, min(20, int(r.query.get("seconds", 12))))
+        if await b._mic_muted():
+            return web.json_response({"ok": False, "error": "mic is muted - unmute it (key 4) first"}, status=409)
+        proc = await asyncio.create_subprocess_exec(
+            "parec", "--raw", "--format=s16le", "--rate=24000", "--channels=1",
+            f"--device={cfg['mic_source']}", "--stream-name=psaudio-buddy-voice-record",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+        try:
+            pcm = await asyncio.wait_for(proc.stdout.readexactly(24000 * 2 * secs), secs + 5)
+        except (asyncio.IncompleteReadError, asyncio.TimeoutError) as e:
+            pcm = getattr(e, "partial", b"")
+        finally:
+            if proc.returncode is None:
+                proc.kill()
+        x = np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768
+        peak = float(np.max(np.abs(x))) if len(x) else 0.0
+        if peak < 0.02:
+            return web.json_response({"ok": False, "error": "heard almost nothing - is the headset on and the mic live?",
+                                      "peak": round(peak, 3)}, status=422)
+        buf = _io.BytesIO()
+        with _wave.open(buf, "wb") as w:
+            w.setnchannels(1); w.setsampwidth(2); w.setframerate(24000); w.writeframes(pcm)
+        try:
+            v = await _save_voice(name, buf.getvalue(), "")
+        except Exception as e:
+            return web.json_response({"ok": False, "error": f"{type(e).__name__}: {str(e)[:160]}"}, status=400)
+        return web.json_response({"ok": True, "voice": v, "peak": round(peak, 3)})
+
+    async def voice_put(r):
+        name = r.match_info["name"]
+        data = await r.read()
+        if len(data) > 5_000_000 or data[:4] != b"RIFF":
+            return web.json_response({"ok": False, "error": "send a WAV file under 5 MB"}, status=400)
+        try:
+            v = await _save_voice(name, data, r.query.get("text", "").strip())
+        except Exception as e:
+            return web.json_response({"ok": False, "error": f"{type(e).__name__}: {str(e)[:160]}"}, status=400)
+        return web.json_response({"ok": True, "voice": v})
+
+    async def voice_delete(r):
+        name = r.match_info["name"]
+        for ext in (".wav", ".txt"):
+            (local_backend.VOICES_DIR / f"{name}{ext}").unlink(missing_ok=True)
+        local_backend._catalog_cache.clear()
+        return web.json_response({"ok": True})
+
+    async def catalog_get(r):
+        return web.json_response({"ok": True, **await local_backend.catalog(b.cfg, b.profiles)})
+
     async def health(r):
         return web.json_response({"ok": True, "state": b.state})
 
-    app = web.Application(middlewares=[guard])
+    app = web.Application(middlewares=[guard], client_max_size=6 * 1024 * 1024)
     app.add_routes([
         web.post("/press", press), web.post("/release", release),
         web.post("/talk/start", talk_start), web.post("/talk/end", talk_end),
@@ -1228,6 +1430,12 @@ def make_app(b: Buddy):
         web.post("/toggle", toggle), web.post("/volume", volume),
         web.get("/status", status), web.get("/history", history),
         web.post("/test/feed", test_feed), web.get("/health", health),
+        web.get("/profiles", profiles_get), web.put("/profiles/{pid}", profile_put),
+        web.delete("/profiles/{pid}", profile_delete), web.post("/profiles/{pid}/use", profile_use),
+        web.get("/catalog", catalog_get), web.get("/voices", voices_get),
+        web.post("/voices/{name:[a-z0-9][a-z0-9_-]{0,31}}/record", voice_record),
+        web.put("/voices/{name:[a-z0-9][a-z0-9_-]{0,31}}", voice_put),
+        web.delete("/voices/{name:[a-z0-9][a-z0-9_-]{0,31}}", voice_delete),
     ])
     return app
 
@@ -1247,8 +1455,8 @@ async def main():
     runner = web.AppRunner(make_app(b), access_log=None)
     await runner.setup()
     await web.TCPSite(runner, cfg["listen"], int(cfg["port"])).start()
-    log.info("psaudio-buddy on %s:%s model=%s voice=%s", cfg["listen"], cfg["port"],
-             cfg["model"], cfg["voice"])
+    log.info("psaudio-buddy on %s:%s profile=%s model=%s voice=%s", cfg["listen"], cfg["port"],
+             b.profile["id"], b.model_name(), b.voice_name())
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for s in (signal.SIGTERM, signal.SIGINT):

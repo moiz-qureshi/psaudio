@@ -38,7 +38,7 @@ def toast(title, body):
 def main():
     e = env()
     url, token = e["BUDDY_URL"], e["BUDDY_TOKEN"]
-    seq, last, last_err, last_vol, last_wake, last_session = -1, None, None, None, None, None
+    seq, last, last_err, last_vol, last_wake, last_session, last_prof = -1, None, None, None, None, None, None
     while True:
         try:
             req = urllib.request.Request(f"{url}/status?since={seq}&wait=25",
@@ -65,6 +65,10 @@ def main():
             if last_vol is not None and st["ai_volume"] != last_vol:
                 toast("AI VOLUME", f"{st['ai_volume']}%")
             last_vol = st["ai_volume"]
+            prof = (st.get("profile") or {}).get("label")
+            if last_prof is not None and prof != last_prof:
+                toast("AI MODEL", prof or "?")
+            last_prof = prof
         except Exception:
             if last != "offline":
                 ctl("keystate", "aibuddy", "offline")

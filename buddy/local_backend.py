@@ -46,6 +46,44 @@ def split_ready(text, first):
             return text[:m.end()].strip(), text[m.end():]
     return None, text
 THINK = re.compile(r"<think>.*?</think>\s*", re.S)
+EMBED_MODEL = "Qwen3-Embedding-4B-4bit-DWQ"
+ROUTE_TOP = 8                 # tools offered per question (all stay available; each step stays small)
+ROUTE_ALWAYS = ("squad_roster", "person_profile")
+LOOKUP_HINT = re.compile(
+    r"\b(who|whose|when|where|which|how (many|much|long|often)|stats?|k ?d|kills?|deaths?|wins?|"
+    r"leaderboard|rank|top|worst|best|trip|flight|land|stay|airbnb|owe|split|paid|pack|poll|"
+    r"weather|food|eat|buds?|tourn\w*|clip|played|playing|online|last (night|week)|this week|"
+    r"today|yesterday|said|messag\w*|whatsapp|group|memory|remember)\b", re.I)
+TOOL_MARKUP = re.compile(r"<\s*/?\s*(tool_?call|function|parameter)", re.I)
+PROMISE = re.compile(r"\b(let me|i'?ll|i will|gonna|one sec|hold on|give me a sec)\b[^.?!]{0,40}"
+                     r"\b(look|check|pull|find|try|dig|see)\b[^.?!]*[.?!]?\s*$", re.I)
+TEXT_CALL = re.compile(r"<\s*function\s*=\s*([^\s>]+)>?(.*?)(?:<\s*/\s*function|$)", re.I | re.S)
+TEXT_PARAM = re.compile(r"<\s*parameter\s*=\s*([^\s>]+)>?\s*(.*?)\s*(?=<\s*/?\s*parameter|<\s*/\s*function|$)", re.I | re.S)
+
+
+def _norm(name):
+    return re.sub(r"[^a-z0-9]", "", name.lower())
+
+
+def text_tool_calls(raw, tools):
+    """Qwen sometimes writes its tool call as text ("<function=tourneyplayerstats
+    <parameter=player ASamad89 ...") instead of a real tool call, and the server
+    hands it over mangled. Recover it so the lookup still happens."""
+    known = {_norm(t["name"]): t["name"] for t in tools}
+    out = []
+    for i, (fname, body) in enumerate(TEXT_CALL.findall(raw)):
+        name = known.get(_norm(fname))
+        if not name:
+            continue
+        args = {}
+        for k, v in TEXT_PARAM.findall(body):
+            v = v.strip()
+            try:
+                args[k] = json.loads(v)
+            except ValueError:
+                args[k] = v
+        out.append({"id": f"text_call_{i}", "name": name, "args": json.dumps(args)})
+    return out
 FILLERS = ["Hold up, checking.", "One sec, pulling it up.", "Hang on, let me look.", "Lemme check the receipts."]
 
 
@@ -303,8 +341,12 @@ class LocalSession:
         self.on_tool = on_tool            # buddy plays a pre-rendered "let me look that up"
         self.turn_mode = {}               # set by the buddy at the end of each question (ROAST key)
         self.may_write = may_write or (lambda name: True)   # writes only for allowed voices
+        self.tool_vecs = None             # embeddings of the tool descriptions, for routing
+        self.vocab = "Hasaan"             # names Whisper should expect (squad, gamertags, trip)
+        self.vocab_t = 0.0
         self.mcp = mcp                    # crcmz MCP client (read-only tools), or None
         self.tools = tools or []
+        self.active_tools = self.tools    # narrowed per question by _route()
         self.history = history            # deque of (user, assistant), bounded by the buddy
         self.on_stage = on_stage          # on_stage(name) -> records a timing on the turn
         self.audio = bytearray()
@@ -333,6 +375,77 @@ class LocalSession:
                 raise LookupError("HasaanVoice on the Mac is not answering")
         return self
 
+    async def _embed(self, texts):
+        r = await self.client.post(self.base + "/embeddings", json={"model": EMBED_MODEL, "input": texts})
+        r.raise_for_status()
+        v = np.array([d["embedding"] for d in r.json()["data"]], dtype=np.float32)
+        return v / (np.linalg.norm(v, axis=1, keepdims=True) + 1e-9)
+
+    async def _load_vocab(self):
+        """Squad names and gamertags (never phone numbers) for Whisper's prompt, so
+        'Samad' isn't heard as 'Sam add'. Refreshed every 30 minutes."""
+        if not self.mcp or time.monotonic() - self.vocab_t < 1800:
+            return
+        self.vocab_t = time.monotonic()
+        names = []
+        try:
+            r = json.loads(await self.mcp.call("squad_roster", {}))
+            for person in r.get("people", []):
+                for k in ("name", "username", "psn_id", "mm_username"):
+                    if person.get(k):
+                        names.append(str(person[k]))
+                names += [str(n) for n in (person.get("whatsapp_names") or [])][:2]
+        except Exception as e:
+            log.warning("squad names for Whisper unavailable: %s", e)
+        try:
+            ov = json.loads(await self.mcp.call("trip_overview", {}))
+            names += [str(n) for n in ov.get("split_people") or []]
+        except Exception:
+            pass
+        seen, out = set(), []
+        for n in names:
+            n = n.strip()
+            if n and n.lower() not in seen and len(n) < 32:
+                seen.add(n.lower())
+                out.append(n)
+        self.vocab = ", ".join(["Hasaan"] + out)[:700]
+        log.info("Whisper hint: %d squad names", len(out))
+
+    async def _index_tools(self):
+        if self.tool_vecs is not None or not self.tools:
+            return
+        docs = [f'{t["name"].replace("_", " ")}: {(t.get("description") or "")[:300]}' for t in self.tools]
+        import hashlib
+        key = hashlib.sha1(json.dumps([EMBED_MODEL] + docs).encode()).hexdigest()[:16]
+        cache = pathlib.Path(os.path.expanduser("~/.local/state/psaudio-buddy")) / f"toolvecs-{key}.npy"
+        if cache.exists():                     # same tools as last time: no re-embedding on reconnect
+            self.tool_vecs = np.load(cache)
+            return
+        self.tool_vecs = await self._embed(docs)
+        try:
+            for old in cache.parent.glob("toolvecs-*.npy"):
+                old.unlink()
+            np.save(cache, self.tool_vecs)
+        except OSError:
+            pass
+
+    async def _route(self, text):
+        """The ~8 tools that fit this question best (plus the people lookups), and a
+        guess whether it needs a lookup at all - so the filler can play before the
+        model has even started."""
+        try:
+            await self._index_tools()
+            q = (await self._embed([text]))[0]
+            sims = self.tool_vecs @ q
+            order = list(np.argsort(-sims)[:ROUTE_TOP])
+            names = {self.tools[i]["name"] for i in order} | set(ROUTE_ALWAYS)
+            picked = [t for t in self.tools if t["name"] in names]
+            likely = bool(LOOKUP_HINT.search(text)) or float(sims.max()) > 0.55
+            return picked, likely
+        except Exception as e:
+            log.warning("tool routing failed (offering all tools): %s", e)
+            return self.tools, bool(LOOKUP_HINT.search(text))
+
     async def warm(self):
         """One tiny request per model so the first real question doesn't pay load time."""
         t = time.monotonic()
@@ -352,6 +465,8 @@ class LocalSession:
             jobs.append(self.client.post(self.base + "/audio/speech", json={
                 "model": LOCAL_DEFAULTS["tts_model"], "input": "ok", "voice": LOCAL_DEFAULTS["tts_voice"],
                 "response_format": "wav"}))
+        jobs.append(self._index_tools())
+        jobs.append(self._load_vocab())
         await asyncio.gather(*jobs, return_exceptions=True)
         log.info("local models warm in %.0f ms", (time.monotonic() - t) * 1000)
 
@@ -382,8 +497,6 @@ class LocalSession:
         try:
             body = {"model": self.p["llm"], "max_tokens": 1, "messages": self._messages("..."),
                     "chat_template_kwargs": {"enable_thinking": False}}
-            if self.tools and self.mcp:
-                body["tools"] = openai_tools(self.tools)       # cache the same prefix as the real call
             await asyncio.wait_for(self.client.post(self.base + "/chat/completions", json=body), 8)
         except Exception:
             pass
@@ -445,7 +558,8 @@ class LocalSession:
         with wave.open(buf, "wb") as w:
             w.setnchannels(1); w.setsampwidth(2); w.setframerate(IN_RATE); w.writeframes(pcm)
         # a fixed language + plain text skips detection and segment output (~0.25 s)
-        form = {"model": self.p["stt"], "response_format": "text"}
+        form = {"model": self.p["stt"], "response_format": "text",
+                "prompt": f"Gaming squad voice chat. Names: {self.vocab}."}
         if self.p.get("language"):
             form["language"] = self.p["language"]
         t = time.monotonic()
@@ -478,12 +592,47 @@ class LocalSession:
         speaker = asyncio.create_task(self._speak(sentences))
         reply = ""
         try:
-            for _round in range(1 if roast else 3):     # at most two rounds of crcmz lookups
-                text_out, calls = await self._stream_llm(msgs, sentences, first_reply=not reply, roast=roast)
+            filled = False
+            if self.tools and self.mcp and not roast:
+                self.active_tools, likely = await self._route(text)
+                self.on_stage("routed_ms")
+                if likely and self.on_tool:            # say "let me look that up" now, not after
+                    self.on_tool()                     # the model has spent seconds deciding
+                    filled = True
+            used_tools = False
+            rounds = 1 if roast else 2                 # up to 2 rounds of crcmz lookups...
+            answered, seen = False, set()
+            for _round in range(rounds + 1):
+                last = _round == rounds                # ...then one pass with tools off, so it answers
+                if last and _round:
+                    msgs.append({"role": "user", "content":
+                                 "(Answer now, out loud, in one or two sentences, from what the tools "
+                                 "returned. Use only numbers and names that appear in those results; "
+                                 "if they found nothing useful, say the app doesn't have it, with "
+                                 "attitude, and invent nothing. Do not call any more tools.)"})
+                text_out, calls = await self._stream_llm(msgs, sentences, first_reply=not reply,
+                                                         roast=roast, tools_on=not last)
                 reply = (reply + " " + text_out).strip() if text_out else reply
-                if not calls or not self.mcp:
+                if not calls and not last and self.mcp and text_out and PROMISE.search(text_out):
+                    # it promised to look something up but didn't: make it follow through
+                    msgs.append({"role": "assistant", "content": text_out})
+                    msgs.append({"role": "user", "content": "(You said you'd look it up. Call the tool now, "
+                                 "or if no tool fits, answer from what you know. Don't say you'll check again.)"})
+                    continue
+                fresh = [c for c in calls if (c["name"], c["args"]) not in seen]
+                if not calls or not self.mcp or last or not fresh:
+                    answered = bool(text_out) or answered or not calls
+                    if calls and not fresh and not last:          # it is repeating itself: answer now
+                        msgs.append({"role": "user", "content": "(You already have those results. Answer now.)"})
+                        text_out, _ = await self._stream_llm(msgs, sentences, first_reply=not reply, tools_on=False)
+                        reply = (reply + " " + text_out).strip() if text_out else reply
+                        answered = bool(text_out)
                     break
-                if not text_out:                       # cover the lookup time with a filler line
+                seen |= {(c["name"], c["args"]) for c in fresh}
+                used_tools = True
+                calls = fresh
+                if not text_out and not filled:        # cover the lookup time with a filler line
+                    filled = True
                     if self.on_tool:
                         self.on_tool()                 # instant, pre-rendered in this voice
                     else:
@@ -500,23 +649,32 @@ class LocalSession:
                 results = await asyncio.gather(*(run(c) for c in calls))
                 for c, res in zip(calls, results):
                     msgs.append({"role": "tool", "tool_call_id": c["id"], "name": c["name"], "content": res})
+            if not reply.strip() or not answered:
+                # never leave someone hanging after "let me look that up"
+                miss = "Couldn't find that one, sorry. Ask me another way."
+                reply = (reply + " " + miss).strip()
+                await sentences.put(miss)
             await sentences.put(None)
             await speaker
         finally:
             if not speaker.done():
                 speaker.cancel()
-        if reply:
+        # remember real answers only: a remembered "let me look that up" teaches it to stall,
+        # and a remembered lookup answer gets repeated later instead of looked up fresh
+        if reply and not PROMISE.search(reply) and "Couldn't find that one" not in reply and not used_tools:
             self.history.append((text, reply))
 
-    async def _stream_llm(self, msgs, sentences, first_reply, roast=False):
+    async def _stream_llm(self, msgs, sentences, first_reply, roast=False, tools_on=True):
         """One streamed completion: speak text as it comes; return (text, tool calls)."""
         body = {"model": self.p["llm"], "messages": msgs, "stream": True,
                 "max_tokens": max(320, int(self.p.get("max_tokens", 220))) if roast else int(self.p.get("max_tokens", 220)),
-                "temperature": max(1.0, float(self.p.get("temperature", 0.8))) if roast else float(self.p.get("temperature", 0.8)),
+                "temperature": (max(1.0, float(self.p.get("temperature", 0.8))) if roast
+                                else min(0.4, float(self.p.get("temperature", 0.8))) if (tools_on and self.tools and self.mcp)
+                                else float(self.p.get("temperature", 0.8))),   # decide calmly, answer with flair
                 "chat_template_kwargs": {"enable_thinking": False}}
-        if self.tools and self.mcp and not roast:
-            body["tools"] = openai_tools(self.tools)
-        reply, pending, in_think, calls = "", "", False, {}
+        if self.tools and self.mcp and not roast and tools_on:
+            body["tools"] = openai_tools(self.active_tools or self.tools)
+        reply, pending, in_think, calls, muted, raw_call = "", "", False, {}, False, ""
         async with self.client.stream("POST", self.base + "/chat/completions", json=body) as resp:
             resp.raise_for_status()
             first = True
@@ -542,7 +700,14 @@ class LocalSession:
                 if first:
                     self.on_stage("llm_first_token_ms")
                     first = False
+                if muted:
+                    raw_call += delta
+                    continue
                 pending += delta
+                m = TOOL_MARKUP.search(pending)
+                if m:                                  # a tool call written out as text: never say it,
+                    raw_call = pending[m.start():]     # but keep it to run the lookup
+                    pending, muted = pending[:m.start()], True
                 if "<think>" in pending:
                     in_think = True
                 if in_think:
@@ -556,11 +721,17 @@ class LocalSession:
                         break
                     reply += (" " if reply else "") + chunk
                     await sentences.put(chunk)
-        tail = THINK.sub("", pending).strip()
-        if tail:
+        tail = THINK.sub("", pending)
+        m = TOOL_MARKUP.search(tail)
+        tail = (tail[:m.start()] if m else tail).strip()
+        if tail and not re.fullmatch(r"[\W_]*", tail):
             reply += (" " if reply else "") + tail
             await sentences.put(tail)
         out = [dict(c, id=c["id"] or f"call_{i}") for i, c in sorted(calls.items()) if c["name"]]
+        if not out and raw_call and tools_on:
+            out = text_tool_calls(raw_call, self.tools)
+            if out:
+                log.info("recovered %d tool call(s) written as text: %s", len(out), [c["name"] for c in out])
         return reply, out
 
     async def _speak(self, sentences):

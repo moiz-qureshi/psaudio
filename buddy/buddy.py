@@ -444,7 +444,11 @@ class WakeDetector:
               "gun shot shotgun sniper roof ammo revive me please help someone anyone seen flag "
               "team son sun sam sean siri what time how where who that this was such hassle side "
               "careful now come here there one two three med kit reload loot drop map zone enemy "
-              "behind cover nice good bad wow man bro dude let us lets").split()
+              "behind cover nice good bad wow man bro dude let us lets "
+              # "hey <someone>": without these, "hey" + any unknown word was heard as
+              # "hey hassan" (about 1 in 4 times in testing)
+              "guys sam son sean shaun shawn ryan mason jason hudson husband handsome listen "
+              "hold look where who why yo boys").split()
     model = None
     model_lock = threading.Lock()
 
@@ -517,7 +521,7 @@ class WakeDetector:
                     self.streak = 0
                     continue
                 self.streak = self.streak + 1 if self.wake_re.search(text) else 0
-                if self.streak >= 2:
+                if self.streak >= 3:            # held for 3 updates (~120 ms), not 2
                     self.mode = "capture"
                     self.streak, after_words, spoke = 0, 0, False
                     free.Reset()
@@ -1499,6 +1503,8 @@ class Buddy:
             if self.session_on and idle > self.cfg["wake"]["session_off_after_s"]:
                 await self.disarm("AI SESSION unused")
             elif self.armed and idle > self.cfg["idle_timeout_s"]:
+                if self.session_on and self.profile["kind"] == "local":
+                    continue          # local costs nothing to keep open: stay warm for the next question
                 if self.session_on:
                     await self.disconnect("idle timeout")
                 else:

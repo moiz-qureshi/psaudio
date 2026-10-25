@@ -1778,6 +1778,21 @@ def make_app(b: Buddy):
         os.chmod(tmp, 0o600)
         tmp.replace(path)
 
+    async def mic_set(r):
+        """Headset mic to the PS5: toggle | mute | unmute, done here on the Pi and
+        answered with the real new state (the deck panel updates at once)."""
+        want = r.query.get("set", "toggle")
+        arg = {"toggle": "toggle", "mute": "1", "unmute": "0"}.get(want)
+        if not arg:
+            return web.json_response({"ok": False, "error": "set=toggle|mute|unmute"}, status=400)
+        proc = await asyncio.create_subprocess_exec("pactl", "set-source-mute", cfg["mic_source"], arg)
+        await asyncio.wait_for(proc.wait(), 3)
+        muted = await b._mic_muted()
+        b.mic_is_muted = muted
+        b.bump()
+        log.info("mic %s -> %s", want, "muted" if muted else "live")
+        return web.json_response({"ok": True, "mic_muted": muted})
+
     async def ack_get(r):
         c = b.ack_conf()
         return web.json_response({"ok": True, "enabled": c["enabled"], "text": c["text"],
@@ -1915,6 +1930,7 @@ def make_app(b: Buddy):
         web.get("/personality", personality_get), web.put("/personality", personality_put),
         web.get("/mcp", mcp_get), web.put("/mcp", mcp_put),
         web.get("/ack", ack_get), web.put("/ack", ack_put),
+        web.post("/mic", mic_set),
         web.get("/fillers", fillers_get), web.put("/fillers", fillers_put),
         web.get("/roast", roast_get), web.put("/roast", roast_put),
         web.post("/voices/{name:[a-z0-9][a-z0-9_-]{0,31}}/record", voice_record),

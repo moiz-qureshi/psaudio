@@ -1,7 +1,7 @@
 #!/bin/bash
 # aibuddy - drive psaudio-buddy (Gemini voice on the PS5 audio Pi) from the deck.
 #   aibuddy press [roast] | release | stop | toggle | arm | disarm | vol up|down [N] | status
-#   aibuddy mic        toggle the headset mic to the PS5 (reads the real mute state from the Pi)
+#   aibuddy mic [toggle|mute|unmute]   headset mic to the PS5, switched on the Pi
 #   aibuddy model next | <profile-id>    switch the AI model profile (managed on Deck Manager's AI page)
 # Token: ~/.config/ragnaros/secrets/aibuddy.env (BUDDY_URL, BUDDY_TOKEN), mode 600.
 set -u
@@ -18,11 +18,7 @@ case "${1:-status}" in
        esac ;;
   model) [[ "${2:-next}" =~ ^[a-z0-9][a-z0-9_-]{0,31}$ ]] || { echo "bad profile id" >&2; exit 2; }
          call "/profiles/${2:-next}/use" 15 ;;
-  mic) if curl -s -m 3 -H "Authorization: Bearer $BUDDY_TOKEN" "$BUDDY_URL/status" | grep -q '"mic_muted": true'; then
-         "$HOME/.config/ragnaros/bin/psaudio" mic_unmute   # the live strip shows the new state, no toast
-       else
-         "$HOME/.config/ragnaros/bin/psaudio" mic_mute
-       fi ;;
+  mic) call "/mic?set=${2:-toggle}" ;;   # toggle on the Pi itself, so a quick double tap can't repeat
   status) curl -s -m 3 -H "Authorization: Bearer $BUDDY_TOKEN" "$BUDDY_URL/status" ;;
   *) echo "usage: aibuddy press|release|stop|toggle|arm|disarm|vol up|down [N]|mic|model next|<id>|status" >&2; exit 2 ;;
 esac

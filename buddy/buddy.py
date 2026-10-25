@@ -679,9 +679,10 @@ class Buddy:
         return c
 
     async def mcp_tools(self):
-        """The crcmz read tools to offer this session ([] when off or unreachable)."""
+        """The crcmz read tools to offer this session ([] when off or unreachable).
+        Local (MacBook) profiles only: squad data is never sent to Gemini / Google."""
         c = self.mcp_conf()
-        if not c["enabled"] or not self.cfg["crcmz_token"]:
+        if not c["enabled"] or not self.cfg["crcmz_token"] or self.profile["kind"] != "local":
             return []
         try:
             if self.mcp is None or self.mcp.url != c["url"] or self.mcp.token != self.cfg["crcmz_token"]:
@@ -704,7 +705,9 @@ class Buddy:
 
         async def one(fc):
             text = await self.mcp.call(fc.name, dict(fc.args or {})) if self.mcp else "error: crcmz not connected"
-            return types.FunctionResponse(id=fc.id, name=fc.name, response={"result": text})
+            # WHEN_IDLE as a backstop: if the call ran async anyway, still speak the answer
+            return types.FunctionResponse(id=fc.id, name=fc.name, response={"result": text},
+                                          scheduling=types.FunctionResponseScheduling.WHEN_IDLE)
         try:
             responses = await asyncio.gather(*(one(fc) for fc in calls))
             if session is not None and session is self.session:
@@ -712,38 +715,56 @@ class Buddy:
         except Exception as e:
             log.warning("tool response failed: %s", e)
 
-    # -- "Ahmm?" when the wake word is heard (instead of a beep) ---------------------
+    # -- short spoken clips: "Hmm?" on the wake word, a filler while crcmz is looked up --
+    FILLERS = ["Oh ok, let me look that up. Give me a second.",
+               "Hold on, let me check that real quick.",
+               "Ok, one sec, pulling that up."]
+
     def ack_conf(self):
         c = self.profiles.data.setdefault("ack", {})
         c.setdefault("enabled", True)
         c.setdefault("text", "Hmm?")
         return c
 
-    def ack_path(self, p=None):
+    def filler_conf(self):
+        c = self.profiles.data.setdefault("fillers", {})
+        c.setdefault("enabled", True)
+        c.setdefault("lines", list(self.FILLERS))
+        return c
+
+    def clip_path(self, text, p=None):
         import hashlib
-        p, c = p or self.profile, self.ack_conf()
-        key = json.dumps([c["text"], p["kind"], p.get("voice"), p.get("tts_provider"), p.get("tts_model"),
+        p = p or self.profile
+        key = json.dumps([text, p["kind"], p.get("voice"), p.get("tts_provider"), p.get("tts_model"),
                           p.get("tts_voice"), p.get("ref_voice")], sort_keys=True)
         return STATE_DIR / "acks" / (hashlib.sha1(key.encode()).hexdigest()[:16] + ".wav")
 
+    def ack_path(self, p=None):
+        return self.clip_path(self.ack_conf()["text"], p)
+
+    def _clip_texts(self):
+        out = [self.ack_conf()["text"]] if self.ack_conf()["enabled"] else []
+        if self.filler_conf()["enabled"]:
+            out += [l for l in self.filler_conf()["lines"] if l.strip()]
+        return out
+
     def prepare_ack(self, all_profiles=False):
-        """Render the wake reply in the active voice (or every profile's), once, in the background."""
-        if not self.ack_conf()["enabled"]:
-            return
-        todo = [p for p in (self.profiles.list() if all_profiles else [self.profile])
-                if not self.ack_path(p).exists()]
+        """Render the wake reply and lookup fillers in the active voice (or every
+        profile's), once each, in the background."""
+        todo = [(p, t) for p in (self.profiles.list() if all_profiles else [self.profile])
+                for t in self._clip_texts() if not self.clip_path(t, p).exists()]
         if not todo or (self.ack_task and not self.ack_task.done()):
             return
 
         async def run():
-            for p in sorted(todo, key=lambda p: p["id"] != self.profile["id"]):   # active one first
-                await self._render_ack(p)
+            for p, t in sorted(todo, key=lambda pt: pt[0]["id"] != self.profile["id"]):   # active first
+                await self._render_clip(p, t)
         self.ack_task = asyncio.create_task(run())
 
-    async def _render_ack(self, p):
+    async def _render_clip(self, p, text):
         import base64
         import httpx
-        text, out = self.ack_conf()["text"], self.ack_path(p)
+        out = self.clip_path(text, p)
         try:
             async with httpx.AsyncClient(timeout=30) as c:
                 if p["kind"] == "gemini":
@@ -793,11 +814,32 @@ class Buddy:
             on = np.where(env > max(env.max() * 0.06, 10 ** (-50 / 20)))[0]
             if len(on):
                 x = x[max(0, on[0] - 960):min(len(x), on[-1] + 960)]
-            x = x[:48000] * (0.7 / max(1e-4, float(np.abs(x).max())))
+            x = x[:24000 * 6] * (0.7 / max(1e-4, float(np.abs(x).max())))
             out.write_bytes(local_backend.pcm_to_wav((x * 32767).astype("<i2").tobytes(), 24000))
-            log.info("wake reply %r ready for %s", text, p["id"])
+            log.info("clip %r ready for %s (%.2f s)", text, p["id"], len(x) / 24000)
         except Exception as e:
-            log.warning("wake reply not rendered (beep instead): %s", str(e)[:160])
+            log.warning("clip %r not rendered for %s: %s", text, p["id"], str(e)[:160])
+
+    def play_filler(self):
+        """crcmz lookup started: say one filler line (once per question), through the
+        same player as replies so the answer follows it instead of overlapping."""
+        c = self.filler_conf()
+        if not c["enabled"] or self.discard or self.turn is None or self.turn.get("filler"):
+            return
+        lines = [l for l in c["lines"] if l.strip()]
+        if not lines:
+            return
+        self._filler_i = (getattr(self, "_filler_i", -1) + 1) % len(lines)
+        path = self.clip_path(lines[self._filler_i])
+        if not path.exists():
+            self.prepare_ack()
+            return
+        import wave
+        with wave.open(str(path)) as w:
+            pcm = w.readframes(w.getnframes())
+        self.turn["filler"] = lines[self._filler_i]
+        if self.player.push(pcm):
+            log.info("filler: %r", lines[self._filler_i])
 
     def personality(self):
         return (self.profiles.data.get("personality") or "").strip() or PERSONALITY
@@ -914,7 +956,8 @@ class Buddy:
             hint = mcp_client.TOOL_HINT if self.live_tools else ""
             return local_backend.LocalSession(dict(self.cfg, system_instruction=self.personality() + hint),
                                               p, self.local_history, self._stage,
-                                              mcp=self.mcp if self.live_tools else None, tools=self.live_tools)
+                                              mcp=self.mcp if self.live_tools else None, tools=self.live_tools,
+                                              on_tool=self.play_filler)
         return client.aio.live.connect(model=p["model"], config=self.live_config())
 
     async def _session_loop(self):
@@ -1018,6 +1061,7 @@ class Buddy:
 
     async def _handle(self, msg):
         if getattr(msg, "tool_call", None) and msg.tool_call.function_calls:
+            self.play_filler()
             task = asyncio.create_task(self._run_tools(msg.tool_call.function_calls))
             self.tool_tasks.add(task)
             task.add_done_callback(self.tool_tasks.discard)
@@ -1672,6 +1716,24 @@ def make_app(b: Buddy):
                 pass
         return await ack_get(r)
 
+    async def fillers_get(r):
+        c = b.filler_conf()
+        ready = all(b.clip_path(l).exists() for l in c["lines"] if l.strip())
+        return web.json_response({"ok": True, "enabled": c["enabled"], "lines": c["lines"],
+                                  "defaults": b.FILLERS, "ready": ready})
+
+    async def fillers_put(r):
+        body = await r.json()
+        c = b.filler_conf()
+        if "enabled" in body:
+            c["enabled"] = bool(body["enabled"])
+        if isinstance(body.get("lines"), list):
+            lines = [str(l).strip()[:120] for l in body["lines"] if str(l).strip()][:8]
+            c["lines"] = lines or list(b.FILLERS)
+        b.profiles.save()
+        b.prepare_ack(all_profiles=True)
+        return await fillers_get(r)
+
     async def mcp_get(r):
         c = b.mcp_conf()
         out = {"ok": True, "enabled": c["enabled"], "url": c["url"], "selected": c["tools"],
@@ -1747,6 +1809,7 @@ def make_app(b: Buddy):
         web.get("/personality", personality_get), web.put("/personality", personality_put),
         web.get("/mcp", mcp_get), web.put("/mcp", mcp_put),
         web.get("/ack", ack_get), web.put("/ack", ack_put),
+        web.get("/fillers", fillers_get), web.put("/fillers", fillers_put),
         web.post("/voices/{name:[a-z0-9][a-z0-9_-]{0,31}}/record", voice_record),
         web.put("/voices/{name:[a-z0-9][a-z0-9_-]{0,31}}", voice_put),
         web.delete("/voices/{name:[a-z0-9][a-z0-9_-]{0,31}}", voice_delete),

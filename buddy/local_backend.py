@@ -298,8 +298,9 @@ def _wav_to_pcm24k(data):
 
 
 class LocalSession:
-    def __init__(self, cfg, profile, history, on_stage, mcp=None, tools=None):
+    def __init__(self, cfg, profile, history, on_stage, mcp=None, tools=None, on_tool=None):
         self.cfg, self.p = cfg, profile
+        self.on_tool = on_tool            # buddy plays a pre-rendered "let me look that up"
         self.mcp = mcp                    # crcmz MCP client (read-only tools), or None
         self.tools = tools or []
         self.history = history            # deque of (user, assistant), bounded by the buddy
@@ -472,8 +473,10 @@ class LocalSession:
                 if not calls or not self.mcp:
                     break
                 if not text_out:                       # cover the lookup time with a filler line
-                    filler = FILLERS[int(time.time()) % len(FILLERS)]
-                    await sentences.put(filler)
+                    if self.on_tool:
+                        self.on_tool()                 # instant, pre-rendered in this voice
+                    else:
+                        await sentences.put(FILLERS[int(time.time()) % len(FILLERS)])
                 self.on_stage("tool_call_ms")
                 msgs.append({"role": "assistant", "content": text_out or None, "tool_calls": [
                     {"id": c["id"], "type": "function", "function": {"name": c["name"], "arguments": c["args"]}}

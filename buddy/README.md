@@ -59,8 +59,8 @@ AI page → **🔌 crcmz knowledge**: paste your personal token from
 app.crcmz.me → Settings → MCP and switch it on. Hasaan can then look up squad
 members, profiles, stats, leaderboards, PSN/Steam status, WhatsApp history,
 clips, tournaments and memories through `https://app.crcmz.me/mcp`, with
-Gemini function calls or local tool calls (a short filler line covers the
-lookup). **Read-only by design**: crcmz's 20 write tools (sending to
+local tool calls on the MacBook (a short filler line covers the lookup).
+**Local profiles only**: squad data is never sent to Gemini / Google. **Read-only by design**: crcmz's 20 write tools (sending to
 WhatsApp/PSN/Mattermost, ring, tasks, records...) are blocked by name and by
 pattern and never offered, because anyone in party chat can say "Hey Hasaan".
 The tool list is editable; fewer tools = cheaper Gemini turns (Live re-bills

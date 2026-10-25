@@ -144,8 +144,11 @@ def selected(all_tools, chosen):
 
 def gemini_declarations(tools):
     from google.genai import types
+    # BLOCKING: wait for the crcmz answer, then speak it. Gemini 3.8 Live defaults to
+    # NON_BLOCKING, where results land silently in context and the reply never comes.
     return [types.FunctionDeclaration(name=t["name"], description=(t.get("description") or "")[:900],
-                                      parameters_json_schema=clean_schema(t.get("inputSchema")))
+                                      parameters_json_schema=clean_schema(t.get("inputSchema")),
+                                      behavior=types.Behavior.BLOCKING)
             for t in tools]
 
 
@@ -161,4 +164,6 @@ TOOL_HINT = (" You can look things up in the squad's CRCMZ app (members, profile
              "with your tools. Use them whenever someone asks about a squad member or squad "
              "history, and use what you find to roast them properly. Call squad_roster first "
              "if you need to work out who a name refers to. Never read out phone numbers, "
-             "addresses or private messages word for word; summarise and roast instead.")
+             "addresses or private messages word for word; summarise and roast instead. "
+             "A short 'let me look that up' line is played for you automatically when you "
+             "use a tool, so don't announce lookups yourself; just give the answer.")

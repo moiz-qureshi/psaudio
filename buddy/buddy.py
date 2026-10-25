@@ -777,15 +777,24 @@ class Buddy:
                                      headers={"Authorization": f"Bearer {self.cfg['omlx_key']}"})
                     r.raise_for_status()
                     raw = r.content
-            trim = "silenceremove=start_periods=1:start_threshold=-55dB"   # a hum starts softly; keep it all
             out.parent.mkdir(parents=True, exist_ok=True)
-            proc = await asyncio.create_subprocess_exec(
-                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", "pipe:0", "-ac", "1",
-                "-af", f"{trim},areverse,{trim},areverse,loudnorm=I=-18:TP=-2", "-ar", "24000",
-                "-t", "2", str(out), stdin=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-            _, err = await asyncio.wait_for(proc.communicate(raw), 30)
-            if proc.returncode != 0:
+            proc = await asyncio.create_subprocess_exec(          # just decode + resample
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-i", "pipe:0", "-ac", "1",
+                "-ar", "24000", "-f", "s16le", "pipe:1",
+                stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            pcm, err = await asyncio.wait_for(proc.communicate(raw), 30)
+            if proc.returncode != 0 or not pcm:
                 raise RuntimeError(err.decode(errors="ignore")[-120:])
+            # trim to where it actually sounds (a soft hum fools ffmpeg's silenceremove),
+            # keep 40 ms either side, and set the level by peak (-3 dBFS)
+            x = np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768
+            win = 240                                            # 10 ms
+            env = np.sqrt(np.convolve(x * x, np.ones(win) / win, mode="same"))
+            on = np.where(env > max(env.max() * 0.06, 10 ** (-50 / 20)))[0]
+            if len(on):
+                x = x[max(0, on[0] - 960):min(len(x), on[-1] + 960)]
+            x = x[:48000] * (0.7 / max(1e-4, float(np.abs(x).max())))
+            out.write_bytes(local_backend.pcm_to_wav((x * 32767).astype("<i2").tobytes(), 24000))
             log.info("wake reply %r ready for %s", text, p["id"])
         except Exception as e:
             log.warning("wake reply not rendered (beep instead): %s", str(e)[:160])

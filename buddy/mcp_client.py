@@ -35,6 +35,9 @@ DEFAULT_TOOLS = [
     "psn_squad_status", "steam_squad_status", "games_played", "game_sessions",
     "whatsapp_awards", "whatsapp_stats", "whatsapp_search", "whatsapp_words", "memory_search",
     "recent_clips", "tourney_leaderboard", "tourney_player_stats", "coach_player_profile", "slap_stats",
+    # the Calgary trip hub (trip.crcmz.me)
+    "trip_overview", "trip_days", "trip_stay", "trip_split", "trip_flights", "trip_packing",
+    "trip_poll", "trip_weather", "trip_food_search", "trip_buds_search",
 ]
 MAX_RESULT = 4000          # characters of a tool result handed to the model (cost + latency)
 
@@ -160,7 +163,8 @@ def openai_tools(tools):
 
 
 TOOL_HINT = (" You can look things up in the squad's CRCMZ app (members, profiles, stats, "
-             "leaderboards, PSN/Steam status, WhatsApp history, clips, tournaments, memories) "
+             "leaderboards, PSN/Steam status, WhatsApp history, clips, tournaments, memories, and "
+             "the Calgary trip: itinerary, stay, flights, who owes whom, packing, polls, food) "
              "with your tools. Use them whenever someone asks about a squad member or squad "
              "history, and use what you find to roast them properly. Call squad_roster first "
              "if you need to work out who a name refers to. Never read out phone numbers, "

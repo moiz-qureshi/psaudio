@@ -1,0 +1,155 @@
+#!/bin/bash
+# psaudio-ctl — control the PS Audio Bridge: soundboard, mic effects, mutes, status.
+# Runs as the psaudio user (directly, or through psaudio-ctl-ssh for remote callers).
+# shellcheck source=../lib/common.sh
+. "${PSAUDIO_LIB:-/usr/local/lib/psaudio}/common.sh"
+VERSION=$(cat "${PSAUDIO_LIB:-/usr/local/lib/psaudio}/VERSION" 2>/dev/null || echo dev)
+
+mkdir -p "$STATE" 2>/dev/null
+cmd=${1:-status}
+arg1=${2:-}
+
+list_sounds() {
+  local f
+  for f in "$SOUNDS_DIR"/*.wav; do [ -e "$f" ] && basename -- "$f" .wav; done
+}
+
+need_sound() {
+  valid_name "$1" || { echo "Invalid sound name"; exit 1; }
+}
+
+case "$cmd" in
+  play)
+    need_sound "$arg1"
+    CLIP=$SOUNDS_DIR/$arg1.wav
+    [ -f "$CLIP" ] || { echo "Sound not found: $arg1 (available: $(list_sounds | tr '\n' ' '))"; exit 1; }
+    PCT=$(volume_pct)
+    VOL=$((PCT * 65536 / 100))
+    for dev in "$(resolve HEADSET_SINK)" "$(resolve GADGET_SINK)"; do
+      [ -n "$dev" ] && paplay --device="$dev" --volume=$VOL "$CLIP" &
+    done
+    echo "Playing: $arg1 at ${PCT}%"
+    ;;
+
+  stop)
+    pkill -f "paplay.*$SOUNDS_DIR" 2>/dev/null || true
+    echo "Stopped all soundboard playback"
+    ;;
+
+  mic_mute)   pactl set-source-mute "$(resolve HEADSET_SOURCE)" 1 && echo "Mic muted" ;;
+  mic_unmute) pactl set-source-mute "$(resolve HEADSET_SOURCE)" 0 && echo "Mic unmuted" ;;
+  mute)       pactl set-sink-mute "$(resolve GADGET_SINK)" 1 && echo "PS5 output muted" ;;
+  unmute)     pactl set-sink-mute "$(resolve GADGET_SINK)" 0 && echo "PS5 output unmuted" ;;
+
+  effect|normal)
+    EFFECT=${arg1:-$cmd}
+    case "$EFFECT" in
+      normal|radio|pitch_high|pitch_low|robot) ;;
+      *) echo "Unknown effect: $EFFECT (valid: normal radio pitch_high pitch_low robot)"; exit 1 ;;
+    esac
+    echo "$EFFECT" > "$STATE/current-effect"
+    systemctl --user restart psaudio-mic-fx.service
+    sleep 1
+    echo "Effect set: $EFFECT (service: $(systemctl --user is-active psaudio-mic-fx.service))"
+    ;;
+
+  volume)
+    PCT=${arg1:-$DEFAULT_VOLUME}
+    [[ "$PCT" =~ ^[0-9]+$ ]] && [ "$PCT" -le 100 ] || { echo "Volume is 0-100"; exit 1; }
+    echo "$PCT" > "$STATE/soundboard-volume" || exit 1
+    echo "$PCT"
+    ;;
+
+  volume_up|volume_down)
+    STEP=${arg1:-5}
+    [[ "$STEP" =~ ^[0-9]+$ ]] || { echo "Step is a number"; exit 1; }
+    CUR=$(volume_pct)
+    if [ "$cmd" = volume_up ]; then NEW=$((CUR + STEP)); else NEW=$((CUR - STEP)); fi
+    [ $NEW -gt 100 ] && NEW=100
+    [ $NEW -lt 0 ] && NEW=0
+    echo "$NEW" > "$STATE/soundboard-volume" || exit 1
+    echo "$NEW"
+    ;;
+
+  get_volume) volume_pct ;;
+
+  sounds)
+    echo "Available sounds:"
+    list_sounds
+    ;;
+
+  receive_sound)
+    need_sound "$arg1"
+    mkdir -p "$SOUNDS_DIR"
+    TMP=$(mktemp "$SOUNDS_DIR/.incoming.XXXXXX")
+    head -c 52428800 > "$TMP"   # 50 MB cap
+    mv "$TMP" "$SOUNDS_DIR/$arg1.wav"
+    echo "OK: received $arg1.wav"
+    ;;
+
+  delete_sound)
+    need_sound "$arg1"
+    rm -f "$SOUNDS_DIR/$arg1.wav"
+    echo "OK: deleted $arg1.wav"
+    ;;
+
+  status)
+    echo "=== PS Audio Bridge $VERSION ==="
+    echo "PipeWire:    $(systemctl --user is-active pipewire 2>/dev/null)"
+    echo "WirePlumber: $(systemctl --user is-active wireplumber 2>/dev/null)"
+    echo "Mic Effects: $(systemctl --user is-active psaudio-mic-fx 2>/dev/null) [effect: $(cat "$STATE/current-effect" 2>/dev/null || echo normal)]"
+    echo "Gadget UDC:  $(cat /sys/kernel/config/usb_gadget/psaudio/UDC 2>/dev/null || echo 'not bound')"
+    echo "Headset:     $(resolve HEADSET_SINK || true)"
+    echo "Console:     $(resolve GADGET_SINK || true)"
+    echo "Mic muted:   $(pactl get-source-mute "$(resolve HEADSET_SOURCE)" 2>/dev/null | awk '{print $2}' || echo unknown)"
+    echo "PS5 muted:   $(pactl get-sink-mute "$(resolve GADGET_SINK)" 2>/dev/null | awk '{print $2}' || echo unknown)"
+    echo "Volume:      $(volume_pct)%"
+    echo "CPU:         $(top -bn1 | awk '/Cpu\(s\)/{print $2"%"}')"
+    echo "Temp:        $(vcgencmd measure_temp 2>/dev/null || awk '{printf "%.1f°C\n",$1/1000}' /sys/class/thermal/thermal_zone0/temp)"
+    XRUNS=$(for f in /proc/asound/card*/pcm*/sub0/status; do grep 'xrun:' "$f" 2>/dev/null; done | awk '{sum+=$2} END{print sum+0}')
+    echo "ALSA xruns:  $XRUNS"
+    ;;
+
+  devices)
+    echo "Sinks (outputs):";   pactl list short sinks   2>/dev/null | awk '{print "  "$2}'
+    echo "Sources (inputs):";  pactl list short sources 2>/dev/null | awk '$2 !~ /\.monitor$/ {print "  "$2}'
+    echo
+    for v in HEADSET_SINK HEADSET_SOURCE GADGET_SINK GADGET_SOURCE; do
+      printf '%-15s %s%s\n' "$v" "$(resolve $v)" "$([ "${!v}" = auto ] && echo '  (auto)')"
+    done
+    ;;
+
+  configure)
+    # Point the console→headset loopback at the resolved devices.
+    SRC=$(resolve GADGET_SOURCE); DST=$(resolve HEADSET_SINK)
+    if [ -z "$SRC" ] || [ -z "$DST" ]; then
+      echo "Can't find the devices yet (console source: ${SRC:-none}, headset: ${DST:-none})."
+      echo "Plug in the headset and the console, then run: psaudio-ctl configure"
+      exit 1
+    fi
+    CONF=$HOME/.config/pipewire/pipewire.conf.d/20-loopbacks.conf
+    mkdir -p "$(dirname "$CONF")"
+    NEW=$(sed -e "s|@GADGET_SOURCE@|$SRC|" -e "s|@HEADSET_SINK@|$DST|" \
+      "${PSAUDIO_LIB:-/usr/local/lib/psaudio}/20-loopbacks.conf.in")
+    if [ "$NEW" != "$(cat "$CONF" 2>/dev/null)" ]; then
+      printf '%s\n' "$NEW" > "$CONF"
+      echo "Loopback: $SRC -> $DST (restarting PipeWire)"
+      [ "${2:-}" = --no-restart ] || systemctl --user restart pipewire pipewire-pulse wireplumber psaudio-mic-fx
+    else
+      echo "Loopback already: $SRC -> $DST"
+    fi
+    ;;
+
+  reboot_audio)
+    systemctl --user restart psaudio-mic-fx wireplumber pipewire-pulse pipewire
+    echo "Audio stack restarted"
+    ;;
+
+  version) echo "$VERSION" ;;
+
+  *)
+    echo "Unknown command: $cmd"
+    echo "Usage: psaudio-ctl play|stop|mic_mute|mic_unmute|mute|unmute|effect|normal|volume|volume_up|volume_down|get_volume|sounds|status|devices|configure|reboot_audio|receive_sound|delete_sound|version"
+    exit 1
+    ;;
+esac

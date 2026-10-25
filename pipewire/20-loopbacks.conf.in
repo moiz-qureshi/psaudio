@@ -1,0 +1,22 @@
+# PS Audio Bridge — console game/chat audio -> headset. Written by `psaudio-ctl configure`.
+context.modules = [
+    {
+        name = libpipewire-module-loopback
+        args = {
+            node.description = "PS5 Game Audio"
+            capture.props = {
+                node.name            = "ps5-game-in"
+                audio.position       = [ FL FR ]
+                target.object        = "@GADGET_SOURCE@"
+                stream.dont-remix    = true
+                node.passive         = false
+            }
+            playback.props = {
+                node.name      = "ps5-game-out"
+                audio.position = [ FL FR ]
+                target.object  = "@HEADSET_SINK@"
+                node.latency   = "512/48000"
+            }
+        }
+    }
+]

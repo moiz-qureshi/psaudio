@@ -1,0 +1,13 @@
+[Unit]
+Description=PS Audio Bridge USB gadget (UAC1 sound card for the console)
+DefaultDependencies=no
+After=local-fs.target
+Before=systemd-user-sessions.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/psaudio-gadget-setup
+
+[Install]
+WantedBy=multi-user.target

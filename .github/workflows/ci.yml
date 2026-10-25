@@ -1,0 +1,41 @@
+name: ci
+on:
+  push:
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          shellcheck -x -S warning bin/* lib/common.sh install.sh uninstall.sh image/build-image.sh scripts/*.sh integrations/ragnaros-deck/bin/psaudio
+      - name: sound generator
+        run: python3 sounds/generate.py "$RUNNER_TEMP/s" && test "$(ls "$RUNNER_TEMP"/s/*.wav | wc -l)" = 10
+
+  install:
+    # arm64 Debian trixie = the same userland as Raspberry Pi OS 13
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - name: install.sh --image in a clean container
+        run: |
+          docker run --rm -v "$PWD:/src:ro" debian:trixie bash -euxc '
+            /src/install.sh --image --automation-key "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB8Kci7Jy8jq3Y9Y9lB0DvLr4aGJ0w9B5k8b2Sx0k5yQ ci"
+            /src/install.sh --image   # second run must be a clean upgrade
+            for f in psaudio-ctl psaudio-ctl-ssh psaudio-gadget-setup psaudio-mic-fx-run; do test -x /usr/local/bin/$f; done
+            test -f /etc/psaudio/psaudio.conf
+            test -L /etc/systemd/system/multi-user.target.wants/psaudio-gadget.service
+            test -f /var/lib/systemd/linger/psaudio
+            test "$(ls /home/psaudio/sounds/*.wav | wc -l)" = 10
+            test -L /home/psaudio/.config/systemd/user/default.target.wants/psaudio-mic-fx.service
+            test "$(grep -c psaudio-ctl-ssh /home/psaudio/.ssh/authorized_keys)" = 1
+            runuser -u psaudio -- env SSH_ORIGINAL_COMMAND="sounds" /usr/local/bin/psaudio-ctl-ssh | grep -q coin
+            runuser -u psaudio -- env SSH_ORIGINAL_COMMAND="sounds; rm -rf /" /usr/local/bin/psaudio-ctl-ssh | grep -q Rejected
+            runuser -u psaudio -- env SSH_ORIGINAL_COMMAND="volume 42" /usr/local/bin/psaudio-ctl-ssh >/dev/null || true
+            runuser -u psaudio -- /usr/local/bin/psaudio-ctl version
+            /src/uninstall.sh
+            test ! -e /usr/local/bin/psaudio-ctl
+          '

@@ -1,0 +1,58 @@
+# PS Audio Bridge actions for a Ragnaros deck managed by Deck Manager.
+# Copy to ~/.config/ragnaros/integrations/psaudio.yaml and bin/psaudio to
+# ~/.config/ragnaros/bin/ (chmod +x). Set PSAUDIO_HOST/PSAUDIO_KEY in bin/psaudio.
+id: psaudio
+name: PS Audio Bridge
+emoji: 🔊
+color: "#c084fc"
+order: 10
+description: Soundboard and mic control on your PS Audio Bridge Pi
+health:
+  tcp: psaudio.local:22
+match:
+  - 'bin/psaudio'
+recognize:
+  - {pattern: 'bin/psaudio play (?P<sound>[A-Za-z0-9_-]+)$', action: play}
+  - {pattern: 'bin/psaudio volume_up (?P<step>\d+)', action: volume_knob, target: knob}
+
+actions:
+  - id: play
+    name: Play sound
+    emoji: 🎵
+    for: [key, touch, press, swipe]
+    params:
+      - {id: sound, label: Sound, type: select, required: true, allow_custom: true,
+         options_from: {command: "~/.config/ragnaros/bin/psaudio sounds | tail -n +2"}}
+    command: ~/.config/ragnaros/bin/psaudio play {{sound|sh}}
+  - id: stop
+    name: Stop playback
+    emoji: ⏹️
+    for: [key, touch, press]
+    command: ~/.config/ragnaros/bin/psaudio stop
+  - id: mic_mute
+    name: Mute mic to console
+    emoji: 🔇
+    for: [key, touch, press]
+    command: ~/.config/ragnaros/bin/psaudio mic_mute
+  - id: mic_unmute
+    name: Unmute mic
+    emoji: 🎤
+    for: [key, touch, press]
+    command: ~/.config/ragnaros/bin/psaudio mic_unmute
+  - id: effect
+    name: Voice effect
+    emoji: 🤖
+    for: [key, touch, press]
+    params:
+      - {id: effect, label: Effect, type: select, default: normal, options: [normal, radio, pitch_high, pitch_low, robot]}
+    command: ~/.config/ragnaros/bin/psaudio effect {{effect|sh}}
+  - id: volume_knob
+    name: Soundboard volume
+    emoji: 🎚️
+    for: [knob]
+    params:
+      - {id: step, label: Step %, type: number, default: 5, min: 1, max: 25}
+    knob:
+      cw: ~/.config/ragnaros/bin/psaudio volume_up {{step|int}}
+      ccw: ~/.config/ragnaros/bin/psaudio volume_down {{step|int}}
+      press: ~/.config/ragnaros/bin/psaudio stop

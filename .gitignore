@@ -1,0 +1,4 @@
+dist/
+backups/
+*.img
+*.img.xz

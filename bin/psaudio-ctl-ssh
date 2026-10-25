@@ -1,0 +1,11 @@
+#!/bin/bash
+# Forced command for remote callers (authorized_keys: command="/usr/local/bin/psaudio-ctl-ssh",…):
+# only psaudio-ctl subcommands, only [A-Za-z0-9 _-]. receive_sound reads the clip from stdin.
+CMD="$SSH_ORIGINAL_COMMAND"
+[[ "$CMD" =~ ^[a-zA-Z0-9_\ -]+$ ]] || { echo "Rejected: invalid characters"; exit 1; }
+read -r -a ARGS <<< "$CMD"
+case "${ARGS[0]}" in
+  play|stop|mic_mute|mic_unmute|mute|unmute|effect|normal|volume|volume_up|volume_down|get_volume|sounds|status|devices|reboot_audio|receive_sound|delete_sound|version) ;;
+  *) echo "Rejected: unknown command '${ARGS[0]}'"; exit 1 ;;
+esac
+exec /usr/local/bin/psaudio-ctl "${ARGS[@]}"

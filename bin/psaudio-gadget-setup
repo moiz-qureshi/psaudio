@@ -1,0 +1,46 @@
+#!/bin/bash
+# Present the Pi to the console as a USB Audio Class 1 device (configfs gadget):
+# capture = what the console plays (game/chat audio), playback = the mic it hears.
+set -e
+. /usr/local/lib/psaudio/common.sh
+: "${GADGET_MANUFACTURER:=Raspberry Pi}" "${GADGET_PRODUCT:=PS Audio Bridge}" "${GADGET_SERIAL:=psaudio-001}"
+GADGET=/sys/kernel/config/usb_gadget/psaudio
+
+modprobe dwc2 2>/dev/null || true
+modprobe libcomposite 2>/dev/null || true
+modprobe usb_f_uac1 2>/dev/null || true
+mountpoint -q /sys/kernel/config || mount -t configfs none /sys/kernel/config
+
+if [ -d "$GADGET/configs" ] && [ -n "$(cat "$GADGET/UDC" 2>/dev/null)" ]; then
+  echo "psaudio-gadget: already configured on $(cat "$GADGET/UDC")"
+  exit 0
+fi
+
+mkdir -p "$GADGET"
+echo 0x1d6b > "$GADGET/idVendor"     # Linux Foundation
+echo 0x0104 > "$GADGET/idProduct"    # Multifunction composite gadget
+echo 0x0100 > "$GADGET/bcdDevice"
+echo 0x0200 > "$GADGET/bcdUSB"
+mkdir -p "$GADGET/strings/0x409"
+echo "$GADGET_MANUFACTURER" > "$GADGET/strings/0x409/manufacturer"
+echo "$GADGET_PRODUCT"      > "$GADGET/strings/0x409/product"
+echo "$GADGET_SERIAL"       > "$GADGET/strings/0x409/serialnumber"
+
+F=$GADGET/functions/uac1.usb0
+mkdir -p "$F"
+echo 3     > "$F/c_chmask"   # console -> Pi: stereo game audio
+echo 48000 > "$F/c_srate"
+echo 2     > "$F/c_ssize"
+echo 1     > "$F/p_chmask"   # Pi -> console: mono mic
+echo 48000 > "$F/p_srate"
+echo 2     > "$F/p_ssize"
+
+mkdir -p "$GADGET/configs/c.1/strings/0x409"
+echo UAC1 > "$GADGET/configs/c.1/strings/0x409/configuration"
+echo 250  > "$GADGET/configs/c.1/MaxPower"
+ln -sf "$F" "$GADGET/configs/c.1/" 2>/dev/null || true
+
+UDC=$(ls /sys/class/udc | head -1)
+[ -n "$UDC" ] || { echo "psaudio-gadget: no USB device controller — is dtoverlay=dwc2,dr_mode=peripheral in config.txt?" >&2; exit 1; }
+echo "$UDC" > "$GADGET/UDC"
+echo "psaudio-gadget: bound to $UDC"

@@ -1,0 +1,16 @@
+[Unit]
+Description=PS Audio Bridge mic effects (headset mic -> console)
+After=pipewire.service pipewire-pulse.service
+Requires=pipewire.service pipewire-pulse.service
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+Environment=PULSE_RUNTIME_PATH=%t/pulse
+ExecStart=/usr/local/bin/psaudio-mic-fx-run
+Restart=on-failure
+RestartSec=3s
+
+[Install]
+WantedBy=default.target

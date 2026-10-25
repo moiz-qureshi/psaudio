@@ -1,0 +1,18 @@
+[Unit]
+Description=PS Audio Bridge: route console audio to the headset
+After=pipewire.service pipewire-pulse.service wireplumber.service
+Requires=pipewire-pulse.service
+StartLimitIntervalSec=300
+StartLimitBurst=30
+
+[Service]
+Type=oneshot
+Environment=PULSE_RUNTIME_PATH=%t/pulse
+ExecStartPre=/bin/sleep 3
+ExecStart=/usr/local/bin/psaudio-ctl configure
+# devices can enumerate late (headset powered on after boot): keep trying
+Restart=on-failure
+RestartSec=10s
+
+[Install]
+WantedBy=default.target

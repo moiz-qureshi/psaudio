@@ -1,0 +1,26 @@
+#!/bin/bash
+# Headset mic -> (effect) -> the console's mic input. Restarted by `psaudio-ctl effect …`.
+. /usr/local/lib/psaudio/common.sh
+EFFECT=$(cat "$STATE/current-effect" 2>/dev/null || echo normal)
+
+# The devices can show up a few seconds after PipeWire; wait for them.
+for _ in $(seq 1 30); do
+  SRC=$(resolve HEADSET_SOURCE); DST=$(resolve GADGET_SINK)
+  [ -n "$SRC" ] && [ -n "$DST" ] && break
+  sleep 2
+done
+[ -n "$SRC" ] && [ -n "$DST" ] || { echo "psaudio-mic-fx: headset mic or console not found" >&2; exit 1; }
+
+case "$EFFECT" in
+  radio)      FILTER="highpass=f=300,lowpass=f=3400,aecho=in_gain=0.8:out_gain=0.7:delays=30:decays=0.3,acompressor=threshold=-20dB:ratio=4:attack=5:release=50,volume=1.5" ;;
+  pitch_high) FILTER="asetrate=38400,aresample=48000" ;;
+  pitch_low)  FILTER="asetrate=57600,aresample=48000" ;;
+  robot)      FILTER="aecho=in_gain=0.8:out_gain=0.8:delays=10|20:decays=0.8|0.6,highpass=f=200" ;;
+  *)          FILTER=anull ;;
+esac
+
+echo "psaudio-mic-fx: effect=$EFFECT $SRC -> $DST" >&2
+
+/usr/bin/ffmpeg -f pulse -fragment_size 960 -i "$SRC" -af "$FILTER" -ar 48000 -ac 1 -f s16le - 2>/dev/null | \
+  pacat --playback --format=s16le --rate=48000 --channels=1 --latency-msec=40 \
+        --device="$DST" --stream-name="psaudio-mic-fx"

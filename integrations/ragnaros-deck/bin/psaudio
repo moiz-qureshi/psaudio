@@ -1,0 +1,7 @@
+#!/bin/bash
+# psaudio — run one psaudio-ctl command on the PS Audio Bridge from another machine.
+#   psaudio play <sound> | stop | volume <pct> | mic_mute | mic_unmute | effect <name> | sounds | status
+# Set PSAUDIO_HOST / PSAUDIO_KEY to match your setup (key = the --automation-key you installed).
+PSAUDIO_HOST=${PSAUDIO_HOST:-psaudio@psaudio.local}
+PSAUDIO_KEY=${PSAUDIO_KEY:-$HOME/.ssh/id_ed25519_psaudio}
+exec ssh -i "$PSAUDIO_KEY" -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new "$PSAUDIO_HOST" "$*"

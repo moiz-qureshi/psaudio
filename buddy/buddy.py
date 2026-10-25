@@ -716,28 +716,34 @@ class Buddy:
     def ack_conf(self):
         c = self.profiles.data.setdefault("ack", {})
         c.setdefault("enabled", True)
-        c.setdefault("text", "Ahmm?")
+        c.setdefault("text", "Hmm?")
         return c
 
-    def ack_path(self):
+    def ack_path(self, p=None):
         import hashlib
-        p, c = self.profile, self.ack_conf()
+        p, c = p or self.profile, self.ack_conf()
         key = json.dumps([c["text"], p["kind"], p.get("voice"), p.get("tts_provider"), p.get("tts_model"),
                           p.get("tts_voice"), p.get("ref_voice")], sort_keys=True)
         return STATE_DIR / "acks" / (hashlib.sha1(key.encode()).hexdigest()[:16] + ".wav")
 
-    def prepare_ack(self):
-        """Render the wake reply in the active voice, once, in the background."""
-        if not self.ack_conf()["enabled"] or self.ack_path().exists():
+    def prepare_ack(self, all_profiles=False):
+        """Render the wake reply in the active voice (or every profile's), once, in the background."""
+        if not self.ack_conf()["enabled"]:
             return
-        if self.ack_task and not self.ack_task.done():
+        todo = [p for p in (self.profiles.list() if all_profiles else [self.profile])
+                if not self.ack_path(p).exists()]
+        if not todo or (self.ack_task and not self.ack_task.done()):
             return
-        self.ack_task = asyncio.create_task(self._render_ack())
 
-    async def _render_ack(self):
+        async def run():
+            for p in sorted(todo, key=lambda p: p["id"] != self.profile["id"]):   # active one first
+                await self._render_ack(p)
+        self.ack_task = asyncio.create_task(run())
+
+    async def _render_ack(self, p):
         import base64
         import httpx
-        p, text, out = self.profile, self.ack_conf()["text"], self.ack_path()
+        text, out = self.ack_conf()["text"], self.ack_path(p)
         try:
             async with httpx.AsyncClient(timeout=30) as c:
                 if p["kind"] == "gemini":
@@ -1645,7 +1651,7 @@ def make_app(b: Buddy):
                 return web.json_response({"ok": False, "error": "say something, e.g. Ahmm?"}, status=400)
             c["text"] = t
         b.profiles.save()
-        b.prepare_ack()
+        b.prepare_ack(all_profiles=True)
         if b.ack_task:
             try:
                 await asyncio.wait_for(asyncio.shield(b.ack_task), 20)

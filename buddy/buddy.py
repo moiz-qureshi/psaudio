@@ -105,6 +105,18 @@ DEFAULTS = {
                        "out_audio": 12.00, "out_text": 4.50},
 }
 
+# The default personality (editable on Deck Manager's AI page; stored in profiles.json)
+PERSONALITY = (
+    "You are Hasaan, the squad's foul-mouthed AI gaming buddy. You're hilarious, cocky and "
+    "quick: roast people, talk trash, and swear casually and often (fuck, shit, damn, hell, "
+    "ass) the way friends do in party chat. Keep it to one or two punchy sentences and land the "
+    "joke fast, with no long setups or introductions. When someone actually asks for help, give "
+    "a real, useful answer, just with attitude. Never use slurs or mock anyone's race, religion, "
+    "sexuality, gender or disability; roast their aim, skills and decisions instead. Don't claim "
+    "to see the game, hear the squad, or know live match events unless someone tells you. "
+    "Questions may start with 'Hey Hasaan', and several squad members may talk to you. You're "
+    "an AI teammate, not a real person, and you own it.")
+
 IN_RATE, OUT_RATE = 16000, 24000          # Gemini Live: 16 kHz in, 24 kHz out, s16le mono
 IN_CHUNK = IN_RATE * 2 * 40 // 1000       # 40 ms of mic per message
 OUT_FRAME = OUT_RATE * 2 * 20 // 1000     # playback is fed in 20 ms frames
@@ -646,8 +658,11 @@ class Buddy:
         if self.turn is not None and name not in self.turn:
             self.turn[name] = now_ms()
 
+    def personality(self):
+        return (self.profiles.data.get("personality") or "").strip() or PERSONALITY
+
     def live_config(self):
-        c = dict(self.cfg, voice=self.profile["voice"])
+        c = dict(self.cfg, voice=self.profile["voice"], system_instruction=self.personality())
         return types.LiveConnectConfig(
             response_modalities=["AUDIO"],
             system_instruction=c["system_instruction"],
@@ -750,7 +765,8 @@ class Buddy:
     def _connect(self, client):
         p = self.profile
         if p["kind"] == "local":
-            return local_backend.LocalSession(self.cfg, p, self.local_history, self._stage)
+            return local_backend.LocalSession(dict(self.cfg, system_instruction=self.personality()),
+                                              p, self.local_history, self._stage)
         return client.aio.live.connect(model=p["model"], config=self.live_config())
 
     async def _session_loop(self):
@@ -1454,6 +1470,21 @@ def make_app(b: Buddy):
         local_backend._catalog_cache.clear()
         return web.json_response({"ok": True})
 
+    async def personality_get(r):
+        return web.json_response({"ok": True, "text": b.personality(), "default": PERSONALITY,
+                                  "custom": bool((b.profiles.data.get("personality") or "").strip())})
+
+    async def personality_put(r):
+        text = ((await r.json()).get("text") or "").strip()
+        if len(text) > 4000:
+            return web.json_response({"ok": False, "error": "keep it under 4000 characters"}, status=400)
+        b.profiles.data["personality"] = "" if text == PERSONALITY else text   # empty = default
+        b.profiles.save()
+        b.local_history.clear()                      # old replies would drag the old tone along
+        if b.session_task and not b.session_task.done():
+            await b.use_profile(b.profile["id"])     # Gemini takes it at connect: reconnect
+        return await personality_get(r)
+
     async def catalog_get(r):
         return web.json_response({"ok": True, **await local_backend.catalog(b.cfg, b.profiles)})
 
@@ -1471,6 +1502,7 @@ def make_app(b: Buddy):
         web.get("/profiles", profiles_get), web.put("/profiles/{pid}", profile_put),
         web.delete("/profiles/{pid}", profile_delete), web.post("/profiles/{pid}/use", profile_use),
         web.get("/catalog", catalog_get), web.get("/voices", voices_get),
+        web.get("/personality", personality_get), web.put("/personality", personality_put),
         web.post("/voices/{name:[a-z0-9][a-z0-9_-]{0,31}}/record", voice_record),
         web.put("/voices/{name:[a-z0-9][a-z0-9_-]{0,31}}", voice_put),
         web.delete("/voices/{name:[a-z0-9][a-z0-9_-]{0,31}}", voice_delete),

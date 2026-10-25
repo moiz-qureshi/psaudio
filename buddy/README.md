@@ -45,6 +45,14 @@ soundboard keep working.
 Your mic muted to the PS5 also mutes it for the buddy: the key shows
 "mic muted", and the wake word can't hear you.
 
+## Personality
+
+One personality for every model, edited on the AI page (**Personality** box;
+*Reset to default* restores the built-in foul-mouthed, funny Hasaan). Stored as
+`personality` in `profiles.json`; Gemini picks a change up on reconnect, which
+saving does for you. No slurs or attacks on identity, by design: it roasts aim
+and decisions.
+
 ## Model profiles (Deck Manager → AI)
 
 Stored on the Pi in `~/.config/psaudio-buddy/profiles.json`, edited from the AI

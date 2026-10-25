@@ -58,7 +58,9 @@ replaces the connection; the keys, wake word and STOP behave the same for all.
 
 **Your voice, two ways**
 - *Cloned:* AI page → **My voice** → put the headset on, unmute the mic,
-  press **Record** and read the script (12 s). Whisper writes the transcript.
+  press **Record** and read the script (20 s) — or, better, record ~25 s on the
+  MacBook (QuickTime / Voice Memos) and **Upload** it (m4a/wav/mp3). The Pi trims
+  silence, evens the loudness and Whisper writes the transcript (editable).
   The recording stays in `~/.config/psaudio-buddy/voices/` on the Pi (mode
   700) and is sent to the Mac as the reference on each phrase. Delete it there
   any time.

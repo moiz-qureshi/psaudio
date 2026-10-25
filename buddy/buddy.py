@@ -1349,14 +1349,33 @@ def make_app(b: Buddy):
             t = res.text.strip()
             return (json.loads(t).get("text", "") if t.startswith("{") else t).strip()
 
+    async def _clean_voice(raw):
+        """Any audio file -> 24 kHz mono 16-bit WAV: rumble cut, silence trimmed at
+        both ends, loudness evened out, at most 30 s. The voice copy imitates
+        whatever it is given, so a clean, even sample matters more than length."""
+        trim = "silenceremove=start_periods=1:start_threshold=-45dB:start_silence=0.15"
+        proc = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-i", "pipe:0", "-vn", "-ac", "1",
+            "-af", f"highpass=f=70,{trim},areverse,{trim},areverse,loudnorm=I=-19:TP=-2:LRA=11",
+            "-ar", "24000", "-sample_fmt", "s16", "-t", "30", "-f", "wav", "pipe:1",
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        out, err = await asyncio.wait_for(proc.communicate(raw), 60)
+        if proc.returncode != 0 or len(out) < 1000:
+            raise ValueError("couldn't read that audio file: " + err.decode(errors="ignore")[-120:].strip())
+        # ffmpeg streams an unknown length into the header; fix the sizes so wave/oMLX can read it
+        i = out.find(b"data")
+        data = out[i + 8:]
+        out = out[:i + 4] + len(data).to_bytes(4, "little") + data
+        out = out[:4] + (len(out) - 8).to_bytes(4, "little") + out[8:]
+        return out
+
     async def _save_voice(name, wav_bytes, text):
         import io as _io, wave as _wave
+        wav_bytes = await _clean_voice(wav_bytes)
         with _wave.open(_io.BytesIO(wav_bytes)) as w:
-            if w.getsampwidth() != 2:
-                raise ValueError("need 16-bit WAV")
             secs = w.getnframes() / w.getframerate()
-        if not 3 <= secs <= 30:
-            raise ValueError(f"recording is {secs:.1f}s; use 5-20 s of clear speech")
+        if not 5 <= secs <= 30:
+            raise ValueError(f"after trimming silence it's {secs:.1f} s of speech; give it 10-30 s")
         if not text:
             text = await _transcribe(wav_bytes)
         local_backend.VOICES_DIR.mkdir(parents=True, exist_ok=True)
@@ -1370,7 +1389,7 @@ def make_app(b: Buddy):
         """Record your voice from the headset mic (memory only until saved here)."""
         import io as _io, wave as _wave
         name = r.match_info["name"]
-        secs = max(5, min(20, int(r.query.get("seconds", 12))))
+        secs = max(8, min(30, int(r.query.get("seconds", 20))))
         if await b._mic_muted():
             return web.json_response({"ok": False, "error": "mic is muted - unmute it (key 4) first"}, status=409)
         proc = await asyncio.create_subprocess_exec(
@@ -1401,13 +1420,26 @@ def make_app(b: Buddy):
     async def voice_put(r):
         name = r.match_info["name"]
         data = await r.read()
-        if len(data) > 5_000_000 or data[:4] != b"RIFF":
-            return web.json_response({"ok": False, "error": "send a WAV file under 5 MB"}, status=400)
+        if not 1000 < len(data) <= 5_000_000:
+            return web.json_response({"ok": False, "error": "send an audio file (wav, m4a, mp3...) under 5 MB"}, status=400)
         try:
             v = await _save_voice(name, data, r.query.get("text", "").strip())
         except Exception as e:
             return web.json_response({"ok": False, "error": f"{type(e).__name__}: {str(e)[:160]}"}, status=400)
         return web.json_response({"ok": True, "voice": v})
+
+    async def voice_text(r):
+        """Fix the transcript if Whisper misheard a word (the copy needs it exact)."""
+        name = r.match_info["name"]
+        t = local_backend.VOICES_DIR / f"{name}.txt"
+        if not t.with_suffix(".wav").exists():
+            return web.json_response({"ok": False, "error": "no such voice"}, status=404)
+        text = ((await r.json()).get("text") or "").strip()
+        if not text:
+            return web.json_response({"ok": False, "error": "empty transcript"}, status=400)
+        t.write_text(text[:1000])
+        local_backend._catalog_cache.clear()
+        return web.json_response({"ok": True})
 
     async def voice_delete(r):
         name = r.match_info["name"]
@@ -1436,6 +1468,7 @@ def make_app(b: Buddy):
         web.post("/voices/{name:[a-z0-9][a-z0-9_-]{0,31}}/record", voice_record),
         web.put("/voices/{name:[a-z0-9][a-z0-9_-]{0,31}}", voice_put),
         web.delete("/voices/{name:[a-z0-9][a-z0-9_-]{0,31}}", voice_delete),
+        web.post("/voices/{name:[a-z0-9][a-z0-9_-]{0,31}}/text", voice_text),
     ])
     return app
 

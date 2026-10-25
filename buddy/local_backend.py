@@ -40,13 +40,16 @@ def split_ready(text, first):
     m = SENTENCE_END.search(text)
     if m and m.end() >= 8:
         return text[:m.end()].strip(), text[m.end():]
-    limit = 18 if first else 140
+    # whole sentences sound natural; the voice model resets its intonation at every
+    # chunk, so only break a sentence at a comma once it gets long
+    limit = 60 if first else 140
     for m in CLAUSE_END.finditer(text):
         if m.end() >= limit and len(text[:m.end()].split()) >= 3:
             return text[:m.end()].strip(), text[m.end():]
     return None, text
 THINK = re.compile(r"<think>.*?</think>\s*", re.S)
 EMBED_MODEL = "Qwen3-Embedding-4B-4bit-DWQ"
+JITTER_S = 0.8                # audio buffered before a take starts playing
 ROUTE_TOP = 8                 # tools offered per question (all stay available; each step stays small)
 ROUTE_ALWAYS = ("squad_roster", "person_profile")
 LOOKUP_HINT = re.compile(
@@ -115,7 +118,7 @@ PROFILE_FIELDS = {
 LOCAL_DEFAULTS = {
     "base_url": "http://192.168.4.38:1234/v1", "stt": "whisper-large-v3-turbo",
     "tts_provider": "omlx", "tts_model": "Kokoro-82M-bf16", "tts_voice": "am_puck",
-    "mac_voice_url": "http://192.168.4.38:8891", "temperature": 0.8, "max_tokens": 220,
+    "mac_voice_url": "http://192.168.4.38:8891", "temperature": 0.8, "max_tokens": 160,
     "history_turns": 4, "extra_instruction": "", "language": "en", "ref_voice": "",
 }
 VOICES_DIR = pathlib.Path(os.path.expanduser("~/.config/psaudio-buddy/voices"))
@@ -715,12 +718,10 @@ class LocalSession:
                         continue
                     pending = THINK.sub("", pending)
                     in_think = False
-                while True:
-                    chunk, pending = split_ready(pending, first=first_reply and not reply)
-                    if not chunk:
-                        break
-                    reply += (" " if reply else "") + chunk
-                    await sentences.put(chunk)
+                # The whole pass is voiced in one take once it is written (see _speak):
+                # one synthesis with the GPU to itself is smooth and ~3x real time,
+                # where phrase-by-phrase synthesis next to the still-writing model
+                # ran slower than real time and sounded chopped and rushed.
         tail = THINK.sub("", pending)
         m = TOOL_MARKUP.search(tail)
         tail = (tail[:m.start()] if m else tail).strip()
@@ -735,31 +736,66 @@ class LocalSession:
         return reply, out
 
     async def _speak(self, sentences):
+        """Voice each finished answer in one streamed take. Playback starts once
+        JITTER_S of audio is buffered (or the take is done), so it never runs dry."""
         first = True
         while True:
             s = await sentences.get()
             if s is None:
                 return
-            s = re.sub(r"[*_#`~>]+", "", s)
+            s = re.sub(r"[*_#`~>]+", "", s).strip()
+            if not s:
+                continue
             if self.p["tts_provider"] == "macos":
-                url = self.p["mac_voice_url"].rstrip("/") + "/speak"
-                r = await self.client.post(url, json={"text": s},
-                                           headers={"Authorization": f"Bearer {self.cfg.get('mac_voice_token', '')}"})
-                r.raise_for_status()
-                pcm = _wav_to_pcm24k(r.content)
-                if first:
-                    self.on_stage("tts_first_ms")
-                    first = False
-                step = OUT_RATE * 2 // 10                   # hand over in 100 ms pieces
-                for i in range(0, len(pcm), step):
-                    await self.out.put(_msg(model_turn=NS(parts=[NS(inline_data=NS(data=pcm[i:i + step]))])))
+                stream = self._one_shot(s)
             else:
-                async for pcm in self._tts_stream(s):
+                stream = self._tts_stream(s)
+            held, started = bytearray(), False
+            async for pcm in stream:
+                if started:
+                    await self._play(pcm)
+                    continue
+                held += pcm
+                if len(held) >= OUT_RATE * 2 * JITTER_S:
+                    started = True
                     if first:
                         self.on_stage("tts_first_ms")
                         first = False
-                    await self.out.put(_msg(model_turn=NS(parts=[NS(inline_data=NS(data=pcm))])))
+                    await self._play(bytes(held))
+            if not started and held:
+                if first:
+                    self.on_stage("tts_first_ms")
+                    first = False
+                await self._play(bytes(held))
             await self.out.put(_msg(output_transcription=NS(text=(" " + s))))
+
+    async def _play(self, pcm):
+        step = OUT_RATE * 2 // 10                               # hand over in 100 ms pieces
+        for i in range(0, len(pcm), step):
+            await self.out.put(_msg(model_turn=NS(parts=[NS(inline_data=NS(data=pcm[i:i + step]))])))
+
+    async def _one_shot(self, text):
+        yield await self._tts_full(text)
+
+    async def _tts_full(self, text):
+        """One phrase, whole, as 24 kHz mono PCM."""
+        if self.p["tts_provider"] == "macos":
+            url = self.p["mac_voice_url"].rstrip("/") + "/speak"
+            r = await self.client.post(url, json={"text": text},
+                                       headers={"Authorization": f"Bearer {self.cfg.get('mac_voice_token', '')}"})
+            r.raise_for_status()
+            return _wav_to_pcm24k(r.content)
+        body = {"model": self.p["tts_model"], "input": text, "voice": self.p.get("tts_voice") or None,
+                "response_format": "wav", "max_tokens": tts_token_cap(text)}
+        ref = voice_ref(self.p.get("ref_voice", "")) if "kokoro" not in self.p["tts_model"].lower() else None
+        if ref:
+            body["ref_audio"], body["ref_text"] = ref
+            body.pop("voice")
+        elif "kokoro" not in self.p["tts_model"].lower():
+            body.update(model=LOCAL_DEFAULTS["tts_model"], voice=LOCAL_DEFAULTS["tts_voice"])
+        r = await self.client.post(self.base + "/audio/speech", json=body)
+        r.raise_for_status()
+        return _wav_to_pcm24k(r.content)
 
     async def _tts_stream(self, text):
         """oMLX streams one WAV header then raw PCM as it is generated; pass the

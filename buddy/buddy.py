@@ -350,6 +350,15 @@ class Player:
                 b = self.queue.popleft()
                 self.queued_bytes -= len(b)
                 pending += b
+            if len(pending) < OUT_FRAME and not self.queue:
+                # a partial frame: wait a moment for the rest instead of padding the
+                # gap with silence (that is what made speech sound chopped)
+                self.wake.clear()
+                try:
+                    await asyncio.wait_for(self.wake.wait(), 0.12)
+                    continue
+                except asyncio.TimeoutError:
+                    pass
             frame, pending = pending[:OUT_FRAME], pending[OUT_FRAME:]
             if len(frame) < OUT_FRAME and not self.queue:
                 frame += b"\0" * (OUT_FRAME - len(frame))

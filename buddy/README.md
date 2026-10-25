@@ -180,7 +180,7 @@ cap the key shows an error until the next day.
 | Wake word: end of speech → turn sent | 554 ms | 576 ms |
 | Wake word: end of speech → first audio | 1.24 s | 1.91 s |
 | Local Qwen + Kokoro: release → first audio | 1.36–1.75 s | 2.07 s |
-| Local Qwen + cloned voice: release → first audio | 1.55 s | 1.95 s |
+| Local Qwen + cloned voice (Qwen3-TTS 1.7B, one take per answer): release → first audio | ~3.0 s | 3.0 s |
 
 These are Pi-side software numbers. The A50 X wireless link adds its own
 delay, the PS5/PSN path to friends adds more, and audible latency was not

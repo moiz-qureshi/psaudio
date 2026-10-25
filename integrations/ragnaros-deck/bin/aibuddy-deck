@@ -59,7 +59,7 @@ def snapshot(st):
 def main():
     e = env()
     url, token = e["BUDDY_URL"], e["BUDDY_TOKEN"]
-    seq, last, last_err, last_session, last_crcmz = -1, None, None, None, None
+    seq, last, last_err, last_session, last_crcmz, pushed = -1, None, None, None, None, time.time()
     while True:
         try:
             req = urllib.request.Request(f"{url}/status?since={seq}&wait=25",
@@ -69,6 +69,8 @@ def main():
             state = st["state"]
             snapshot(st)
             roast_turn = st.get("turn_mode") == "roast"
+            if time.time() - pushed > 30:           # backstop: the deck daemon may have restarted
+                last, last_session, pushed = None, None, time.time()
             if (state, roast_turn) != last:
                 ctl("keystate", "aibuddy", state)
                 # the ROAST key lights up only while a roast is being taken / spoken

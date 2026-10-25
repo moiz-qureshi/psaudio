@@ -60,7 +60,7 @@ STATE_DIR = pathlib.Path(os.environ.get(
 DEFAULTS = {
     "model": "gemini-3.8-live",
     "voice": "Puck",
-    "ai_volume": 70,             # percent, applied before the limiter
+    "ai_volume": 100,            # percent, applied before the limiter
     "limiter_ceiling": 0.85,     # peak of the AI signal after limiting (≈ -1.4 dBFS)
     "idle_timeout_s": 900,       # an armed session closes after this long unused
     "max_listen_s": 30,          # a stuck key submits after this long

@@ -4,7 +4,7 @@
 
 model = "gemini-3.8-live"        # any Live model your key can use, e.g. gemini-3.1-flash-live-preview
 voice = "Puck"                   # prebuilt voice: Puck, Kore, Charon, Fenrir, Aoede, Leda, Orus, Zephyr, ...
-ai_volume = 70                   # percent of the AI voice before the limiter (0-150); deck VOL keys change it live
+ai_volume = 100                  # percent of the AI voice before the limiter (0-150)
 limiter_ceiling = 0.85           # AI peak after the soft limiter, linear (0.85 ≈ -1.4 dBFS)
 
 idle_timeout_s = 900             # an armed session is closed after this long unused

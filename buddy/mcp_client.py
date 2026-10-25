@@ -115,8 +115,28 @@ class CrcmzMCP:
         log.info("mcp %s(%s) %.0f ms, %d chars", name, json.dumps(args)[:80],
                  (time.monotonic() - t) * 1000, len(text))
         if len(text) > MAX_RESULT:
-            text = text[:MAX_RESULT] + " ...[truncated]"
+            text = shrink(text)
         return ("error: " if res.get("isError") else "") + text
+
+
+def shrink(text):
+    """Cut a long JSON result by dropping whole list entries (a raw cut mid-string left
+    the model unreadable JSON), falling back to a plain cut."""
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return text[:MAX_RESULT] + " ...[truncated]"
+    lists = [k for k, v in data.items() if isinstance(v, list)] if isinstance(data, dict) else []
+    out = json.dumps(data, ensure_ascii=False)
+    while len(out) > MAX_RESULT and lists:
+        k = max(lists, key=lambda k: len(json.dumps(data[k], ensure_ascii=False)))
+        if not data[k]:
+            lists.remove(k)
+            continue
+        data[k] = data[k][:-1]
+        data["_note"] = "list shortened to fit"
+        out = json.dumps(data, ensure_ascii=False)
+    return out if len(out) <= MAX_RESULT else out[:MAX_RESULT] + " ...[truncated]"
 
 
 def clean_schema(schema):
@@ -183,6 +203,9 @@ TOOL_HINT = (" You can look things up in the squad's CRCMZ app (members, profile
              "addresses or private messages word for word; summarise and roast instead. "
              + FILLER_SENTENCE +
              "Never make up stats, numbers, dates or results: only say what a tool returned. "
+             "For a question about a person: try person_profile, and if it finds nothing also "
+             "check squad_facts (saved facts about people) and memory_search before you say "
+             "you don't know them. "
              "If a lookup comes back empty, say the app doesn't have that and roast them anyway "
              "without inventing numbers. "
              "Some tools SEND or CHANGE things (messages to WhatsApp, PSN or Mattermost, ringing "

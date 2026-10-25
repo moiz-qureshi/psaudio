@@ -50,8 +50,11 @@ def split_ready(text, first):
 THINK = re.compile(r"<think>.*?</think>\s*", re.S)
 EMBED_MODEL = "Qwen3-Embedding-4B-4bit-DWQ"
 JITTER_S = 0.8                # audio buffered before a take starts playing
+PERSON_Q = re.compile(r"\b(?:who\s+is|who's|whos|who\s+the\s+(?:hell|fuck)\s+is|tell\s+me\s+about|"
+                      r"(?:a\s+)?facts?\s+about|what\s+do\s+you\s+know\s+about|what's\s+up\s+with|roast)\s+"
+                      r"(?P<name>[\w.'@-]+(?:\s+[\w.'@-]+){0,2})", re.I)
 ROUTE_TOP = 8                 # tools offered per question (all stay available; each step stays small)
-ROUTE_ALWAYS = ("squad_roster", "person_profile")
+ROUTE_ALWAYS = ("squad_roster", "person_profile", "squad_facts", "memory_search")   # people questions
 LOOKUP_HINT = re.compile(
     r"\b(who|whose|when|where|which|how (many|much|long|often)|stats?|k ?d|kills?|deaths?|wins?|"
     r"leaderboard|rank|top|worst|best|trip|flight|land|stay|airbnb|owe|split|paid|pack|poll|"
@@ -347,6 +350,7 @@ class LocalSession:
         self.tool_vecs = None             # embeddings of the tool descriptions, for routing
         self.vocab = "Hasaan"             # names Whisper should expect (squad, gamertags, trip)
         self.vocab_t = 0.0
+        self.names = []                   # every known person name/alias, for fixing lookups
         self.mcp = mcp                    # crcmz MCP client (read-only tools), or None
         self.tools = tools or []
         self.active_tools = self.tools    # narrowed per question by _route()
@@ -398,8 +402,15 @@ class LocalSession:
                     if person.get(k):
                         names.append(str(person[k]))
                 names += [str(n) for n in (person.get("whatsapp_names") or [])][:2]
+            for u in r.get("untagged") or []:              # people not linked to an account yet
+                names.append(str(u.get("name") if isinstance(u, dict) else u))
         except Exception as e:
             log.warning("squad names for Whisper unavailable: %s", e)
+        try:                                               # who the saved facts are about
+            f = json.loads(await self.mcp.call("squad_facts", {"limit": 100}))
+            names += [str(x.get("about")) for x in f.get("facts", []) if x.get("about")]
+        except Exception:
+            pass
         try:
             ov = json.loads(await self.mcp.call("trip_overview", {}))
             names += [str(n) for n in ov.get("split_people") or []]
@@ -411,8 +422,66 @@ class LocalSession:
             if n and n.lower() not in seen and len(n) < 32:
                 seen.add(n.lower())
                 out.append(n)
+        self.names = out
         self.vocab = ", ".join(["Hasaan"] + out)[:700]
         log.info("Whisper hint: %d squad names", len(out))
+
+    async def _people_lookup(self, text):
+        """'Who is X' / 'fact about X': look X up here, before the model starts, so
+        the answer never depends on the model choosing the right tool (it often
+        stopped at the roster) and needs no extra model round."""
+        if not self.mcp:
+            return None
+        m = PERSON_Q.search(text)
+        if not m:
+            return None
+        raw = re.sub(r"\b(the|a|an|please|bro|again|now)\b|[?!.,]+$", "", m.group("name"), flags=re.I).strip()
+        if not raw or raw.lower() in ("you", "me", "him", "her", "them", "this", "that", "it", "hasaan", "hassan"):
+            return None
+        who = _json_args(self._fix_names("person_profile", json.dumps({"who": raw}))).get("who", raw)
+        prof, facts = await asyncio.gather(self.mcp.call("person_profile", {"who": who}),
+                                           self.mcp.call("squad_facts", {"subject": who, "limit": 10}),
+                                           return_exceptions=True)
+        parts = []
+        if isinstance(prof, str) and '"found": false' not in prof:
+            parts.append("person_profile: " + prof[:1800])
+        if isinstance(facts, str) and '"count": 0' not in facts:
+            parts.append("squad_facts (saved facts about them): " + facts[:1200])
+        self.on_stage("people_lookup_ms")
+        log.info("people lookup %r -> %s", who, [p.split(":")[0] for p in parts] or "nothing")
+        if not parts:
+            return (f"(Looked up '{who}' in the squad app before you answered: no profile and no saved "
+                    f"facts. Try memory_search before saying you don't know them.)")
+        return f"(Looked up '{who}' in the squad app before you answered:)\n" + "\n".join(parts)
+
+    PERSON_ARGS = ("who", "subject", "player", "name", "person", "username", "psn_id")
+
+    def _fix_names(self, tool, args_json):
+        """Speech-to-text and the model mangle gamertags ("asamad89" became "aceamad89"),
+        so a person argument is snapped to the closest known squad name/alias."""
+        import difflib
+        args = _json_args(args_json)
+        if not self.names:
+            return args_json
+        norm = lambda n: re.sub(r"[^a-z0-9]", "", n.lower())
+        table = {}
+        for n in self.names:
+            table.setdefault(norm(n), n)
+        changed = False
+        for k in self.PERSON_ARGS:
+            v = args.get(k)
+            if not isinstance(v, str) or not v.strip():
+                continue
+            if norm(v) in table:                       # same name, different spelling ("m.b." = MB)
+                if v != table[norm(v)]:
+                    args[k], changed = table[norm(v)], True
+                continue
+            hit = difflib.get_close_matches(norm(v), list(table), n=1, cutoff=0.6)
+            if hit:
+                log.info("lookup name %r -> %r (%s)", v, table[hit[0]], tool)
+                args[k] = table[hit[0]]
+                changed = True
+        return json.dumps(args) if changed else args_json
 
     async def _index_tools(self):
         if self.tool_vecs is not None or not self.tools:
@@ -583,6 +652,7 @@ class LocalSession:
         await self.out.put(_msg(input_transcription=NS(text=text)))
 
         roast = self.turn_mode.get("mode") == "roast"
+        people_ctx = None if roast else await self._people_lookup(text)
         if roast:
             # ROAST key: one savage roast of a random player, no lookups, no history
             msgs = [{"role": "system", "content": self.cfg["system_instruction"].split(" You can look things up")[0]
@@ -590,6 +660,8 @@ class LocalSession:
                     {"role": "user", "content": text}]
         else:
             msgs = self._messages(text)
+            if people_ctx:
+                msgs.insert(-1, {"role": "system", "content": people_ctx})
 
         sentences = asyncio.Queue()
         speaker = asyncio.create_task(self._speak(sentences))
@@ -645,6 +717,7 @@ class LocalSession:
                     {"id": c["id"], "type": "function", "function": {"name": c["name"], "arguments": c["args"]}}
                     for c in calls]})
                 async def run(c):
+                    c = dict(c, args=self._fix_names(c["name"], c["args"]))
                     if not self.may_write(c["name"]):
                         return ("refused: only Moiz can ask me to send or change things; "
                                 "tell whoever asked that they can't make you do that")

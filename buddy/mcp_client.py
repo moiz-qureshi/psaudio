@@ -170,7 +170,9 @@ NO_WRITE_HINT = (" You cannot send messages (WhatsApp, PSN, Mattermost), ring an
 
 FILLER_SENTENCE = ("A short 'let me look that up' line is played for you automatically when you "
                    "use a tool, so don't announce lookups yourself; just give the answer. ")
-NO_FILLER_SENTENCE = "Never say you're looking something up or checking; just give the answer. "
+NO_FILLER_SENTENCE = ("When you need to look something up, first say one short line in your own words "
+                      "so they know you're on it (vary it every time, never the same phrase twice), "
+                      "then use the tool and give the answer. ")
 
 TOOL_HINT = (" You can look things up in the squad's CRCMZ app (members, profiles, stats, "
              "leaderboards, PSN/Steam status, WhatsApp history, clips, tournaments, memories, and "

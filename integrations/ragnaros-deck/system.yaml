@@ -1,0 +1,45 @@
+name: system
+# opti3 server page (headless box): live stats + device health. Keys/strip are drawn by
+# bin/sysdeck (user unit sysdeck.service) and pushed by ragnarosd-plus (`live:` keys,
+# `strip: live: system`). Press a key / tap a panel for a detail view on the strip;
+# knob 0 flips through the views. Built-in original: /usr/lib/python3/dist-packages/ragnaros/profiles/system.yaml
+keys:
+  "0": {live: sys.cpu, action: "plus:detail:cpu"}
+  "1": {live: sys.ram, action: "plus:detail:ram"}
+  "2": {live: sys.temp, action: "plus:detail:temp"}
+  "3": {live: sys.disk, action: "plus:detail:disk"}
+  "4": {live: sys.docker, action: "plus:detail:docker"}
+  "5": {live: sys.pi, action: "plus:detail:devices"}
+  "6": {live: sys.ha, action: "plus:detail:devices"}
+  "7": {live: sys.mac, action: "plus:detail:devices"}
+  "8": {live: sys.tunnels, action: "plus:detail:devices"}
+  "9": {live: sys.internet, action: "plus:detail:net"}
+knobs:
+  "0":
+    rotate:
+      cw: "plus:detail:next"
+      ccw: "plus:detail:prev"
+    press: "plus:detail:toggle"
+  "1":
+    rotate:
+      cw: ssh -o ConnectTimeout=3 macbook "python3 ~/.brightness_step.py 0.1"
+      ccw: ssh -o ConnectTimeout=3 macbook "python3 ~/.brightness_step.py -0.1"
+    press: ssh -o ConnectTimeout=3 macbook "python3 ~/.brightness_step.py 0.5"
+  "2":
+    rotate:
+      cw: /home/opti3/.config/ragnaros/bin/aibuddy headset up 5
+      ccw: /home/opti3/.config/ragnaros/bin/aibuddy headset down 5
+    press: /home/opti3/.config/ragnaros/bin/aibuddy mic
+    dm: {i: aibuddy, a: headset_knob, p: {step: '5'}}
+  "3":
+    rotate:
+      cw: /home/opti3/.config/ragnaros/deck_brightness.sh 10
+      ccw: /home/opti3/.config/ragnaros/deck_brightness.sh -10
+    press: ragnarosctl brightness 100
+strip:
+  live: system
+  touch:
+    '0': "plus:detail:cpu"
+    '1': "plus:detail:ram"
+    '2': "plus:detail:net"
+    '3': "plus:detail:temp"

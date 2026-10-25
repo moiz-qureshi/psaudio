@@ -1,0 +1,372 @@
+#!/usr/bin/env python3
+"""Collect opti3's stats + device health for the deck's System page, and render
+its keys and strip while that page is on screen.
+
+Writes ~/.local/state/ragnaros-plus/sys/:
+  state.json   all numbers (the daemon draws detail views from it)
+  keys.json    {tag: signature}; key_<tag>.png per live key (`live: sys.cpu` …)
+  strip.json   {sigs: [4]}; strip.png (704x124, `strip: live: system`)
+Stdlib only. No network calls happen inside the deck daemon.
+"""
+import json
+import os
+import socket
+import subprocess
+import sys
+import threading
+import time
+import urllib.request
+
+sys.path.insert(0, os.path.expanduser("~/.config/ragnaros"))
+import page_system  # noqa: E402
+
+from ragnaros import control  # noqa: E402
+
+OUT = os.path.expanduser("~/.local/state/ragnaros-plus/sys")
+SOCK = os.path.expanduser("~/.local/state/ragnaros-plus/ctl.sock")
+AIBUDDY = os.path.expanduser("~/.local/state/ragnaros-plus/aibuddy.json")
+HA_TOKEN = os.path.expanduser("~/.ha_token")
+PAGE = "system"
+TICK, HIST = 2.0, 60                       # seconds per sample, samples kept (2 min)
+TUNNELS = ("cloudflare-tunnel", "cloudflared-coolify-apps")
+HZ = os.sysconf("SC_CLK_TCK")
+PAGE_SIZE = os.sysconf("SC_PAGE_SIZE")
+CORES = os.cpu_count() or 1
+
+
+def read(path):
+    try:
+        with open(path) as f:
+            return f.read()
+    except OSError:
+        return ""
+
+
+def write_json(path, data):
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(data, f)
+    os.replace(tmp, path)
+
+
+def hist_push(lst, v):
+    lst.append(v)
+    del lst[:-HIST]
+
+
+# -- local stats -------------------------------------------------------------------
+class Local:
+    def __init__(self):
+        self.cpu_prev = self.net_prev = None
+        self.proc_prev, self.proc_t = {}, None
+        self.h_cpu, self.h_ram, self.h_net, self.h_temp = [], [], [], []
+
+    def cpu(self):
+        v = [int(x) for x in read("/proc/stat").split("\n")[0].split()[1:9]]
+        busy, total = sum(v) - v[3] - v[4], sum(v)
+        prev, self.cpu_prev = self.cpu_prev, (busy, total)
+        load = read("/proc/loadavg").split()[:3]
+        if not prev or total == prev[1]:
+            return None
+        pct = 100 * (busy - prev[0]) / (total - prev[1])
+        hist_push(self.h_cpu, round(pct, 1))
+        return {"pct": pct, "load": load[0] if load else "-", "load3": " ".join(load), "cores": CORES,
+                "hist": self.h_cpu}
+
+    def ram(self):
+        info = {}
+        for line in read("/proc/meminfo").splitlines():
+            k, _, rest = line.partition(":")
+            info[k] = int(rest.split()[0]) if rest.split() else 0
+        total, avail = info.get("MemTotal", 1), info.get("MemAvailable", 0)
+        st, sf = info.get("SwapTotal", 0), info.get("SwapFree", 0)
+        pct = 100 * (total - avail) / total
+        hist_push(self.h_ram, round(pct, 1))
+        return {"pct": pct, "used": total - avail, "total": total,
+                "swap_pct": 100 * (st - sf) / st if st else 0, "hist": self.h_ram}
+
+    def temp(self):
+        sensors, cpu, fan = [], None, None
+        base = "/sys/class/hwmon"
+        nvme = 0
+        for e in sorted(os.listdir(base)):
+            name = read(f"{base}/{e}/name").strip()
+            if name not in ("coretemp", "nvme", "dell_smm", "dell_ddv"):
+                continue
+            temps = {}
+            for f in os.listdir(f"{base}/{e}"):
+                if f.startswith("temp") and f.endswith("_input"):
+                    raw = read(f"{base}/{e}/{f}").strip()
+                    if raw.lstrip("-").isdigit():
+                        label = read(f"{base}/{e}/{f[:-6]}_label").strip() or name
+                        temps[label] = max(temps.get(label, -99), int(raw) / 1000)
+                if f.startswith("fan") and f.endswith("_input") and fan is None:
+                    rpm = read(f"{base}/{e}/{f}").strip()
+                    if rpm.isdigit() and int(rpm) > 0:
+                        fan = int(rpm)
+            if name == "coretemp":
+                pkg = temps.get("Package id 0") or max(temps.values(), default=None)
+                cpu = pkg
+                cores = [v for k, v in temps.items() if k.startswith("Core")]
+                sensors.append(("CPU package", pkg))
+                if cores:
+                    sensors.append(("hottest core", max(cores)))
+            elif name == "nvme":
+                nvme += 1
+                sensors.append((f"NVMe {nvme}", temps.get("Composite") or max(temps.values(), default=0)))
+            elif name == "dell_ddv":
+                for k in ("Ambient", "Memory"):
+                    if temps.get(k):
+                        sensors.append((k.lower(), temps[k]))
+        sensors.sort(key=lambda kv: (not kv[0].startswith(("CPU", "hottest")), kv[0]))
+        if fan:
+            sensors.append(("fan", f"{fan} rpm"))
+        if cpu is not None:
+            hist_push(self.h_temp, round(cpu, 1))
+        return {"c": cpu, "fan": f"{fan} rpm" if fan else "", "sensors": sensors, "hist": self.h_temp}
+
+    def disk(self):
+        mounts, seen = [], set()
+        for line in read("/proc/mounts").splitlines():
+            dev, mnt, fs = line.split()[:3]
+            if not dev.startswith("/dev/") or fs in ("squashfs", "vfat") or dev in seen or mnt.startswith("/snap"):
+                continue
+            try:
+                s = os.statvfs(mnt)
+            except OSError:
+                continue
+            if not s.f_blocks:
+                continue
+            seen.add(dev)
+            pct = 100 * (1 - s.f_bavail / s.f_blocks)
+            free = s.f_bavail * s.f_frsize / 1e9
+            mounts.append((mnt, pct, f"{free:.0f} GB" if free < 1000 else f"{free / 1000:.1f} TB"))
+        root = next((m for m in mounts if m[0] == "/"), (None, None, "?"))
+        return {"pct": root[1], "free": root[2], "mounts": mounts}
+
+    def net(self):
+        now, ifaces = time.monotonic(), {}
+        for line in read("/proc/net/dev").splitlines()[2:]:
+            name, _, rest = line.partition(":")
+            name, f = name.strip(), rest.split()
+            if name == "lo" or name.startswith(("veth", "br-", "docker")) or len(f) < 9:
+                continue
+            ifaces[name] = (int(f[0]), int(f[8]))
+        prev, self.net_prev = self.net_prev, (ifaces, now)
+        rows, down, up = [], 0.0, 0.0
+        if prev:
+            span = now - prev[1]
+            for name, (rx, tx) in ifaces.items():
+                if name in prev[0]:
+                    d, u_ = (rx - prev[0][name][0]) / span, (tx - prev[0][name][1]) / span
+                    rows.append((name, d, u_))
+                    if name == "enp0s31f6":
+                        down, up = d, u_
+        rows.sort(key=lambda r: -(r[1] + r[2]))
+        hist_push(self.h_net, round(down))
+        return {"down": down, "up": up, "ifaces": rows[:8], "hist": self.h_net, "ip": "192.168.5.54"}
+
+    def procs(self):
+        """Top processes by CPU (% of one core, like top) and by memory, grouped by name."""
+        now, cur, mem = time.monotonic(), {}, {}
+        for pid in os.listdir("/proc"):
+            if not pid.isdigit():
+                continue
+            raw = read(f"/proc/{pid}/stat")
+            if not raw:
+                continue
+            name = raw[raw.find("(") + 1:raw.rfind(")")]
+            f = raw[raw.rfind(")") + 2:].split()
+            try:
+                cur[pid] = (name, int(f[11]) + int(f[12]))
+                rss = int(f[21]) * PAGE_SIZE / 1048576
+            except (IndexError, ValueError):
+                continue
+            mem[name] = mem.get(name, 0) + rss
+        cpu = {}
+        if self.proc_t:
+            span = now - self.proc_t
+            for pid, (name, ticks) in cur.items():
+                if pid in self.proc_prev:
+                    cpu[name] = cpu.get(name, 0) + 100 * (ticks - self.proc_prev[pid][1]) / HZ / span
+        self.proc_prev, self.proc_t = cur, now
+        top_cpu = sorted(cpu.items(), key=lambda kv: -kv[1])[:8]
+        top_mem = sorted(mem.items(), key=lambda kv: -kv[1])[:8]
+        return [(n, round(p, 1)) for n, p in top_cpu], [(n, round(m)) for n, m in top_mem]
+
+
+# -- docker + devices (slower, in threads) -----------------------------------------
+def docker():
+    try:
+        out = subprocess.run(["docker", "ps", "-a", "--format", "{{.Names}}|{{.State}}|{{.Status}}|{{.Label \"coolify.serviceName\"}}"],
+                             capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    running, total, bad, states = 0, 0, [], {}
+    for line in out.splitlines():
+        name, state, status, nice = (line.split("|") + ["", "", ""])[:4]
+        total += 1
+        states[name] = state
+        name = nice or name                      # Coolify containers: service name, not the uuid
+        if state == "running":
+            running += 1
+            if "unhealthy" in status:
+                bad.append((name, "unhealthy"))
+        elif state == "restarting":
+            bad.append((name, "restarting"))
+        elif state == "exited" and "(0)" not in status and any(
+                w in status for w in ("second", "minute", "hour")):
+            bad.append((name, status.replace("Exited ", "exit ")[:26]))
+    return {"running": running, "total": total, "bad": bad, "states": states}
+
+
+def tcp_ms(host, port, timeout=2.0):
+    t = time.monotonic()
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return (time.monotonic() - t) * 1000
+    except OSError:
+        return None
+
+
+def http(url, headers=None, timeout=3.0):
+    """(status or None, ms); any HTTP answer means the service is up."""
+    t = time.monotonic()
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 sysdeck", **(headers or {})}), timeout=timeout) as r:
+            code = r.status
+    except urllib.error.HTTPError as e:
+        code = e.code
+    except Exception:
+        return None, None
+    return code, (time.monotonic() - t) * 1000
+
+
+def dns_ok(name="cloudflare.com", timeout=3.0):
+    box = []
+    th = threading.Thread(target=lambda: box.append(socket.getaddrinfo(name, 443)), daemon=True)
+    th.start()
+    th.join(timeout)
+    return bool(box)
+
+
+def ms(v):
+    return f"{v:.0f} ms" if v is not None else "DOWN"
+
+
+def devices(dock):
+    out = {}
+    ai = {}
+    try:
+        ai = json.load(open(AIBUDDY))
+    except (OSError, ValueError):
+        pass
+    p = tcp_ms("192.168.5.151", 22)
+    fresh = time.time() - ai.get("ts", 0) < 120
+    out["pi"] = {"ok": p is not None, "word": ms(p),
+                 "sub": f"Hasaan {ai.get('state', '?')}" if fresh else "Hasaan no link"}
+    token = read(HA_TOKEN).strip()
+    code, t = http("http://192.168.5.101:8123/api/", {"Authorization": f"Bearer {token}"})
+    out["ha"] = {"ok": code == 200, "word": ms(t) if code == 200 else ("DOWN" if code is None else f"HTTP {code}"),
+                 "sub": "API ok" if code == 200 else "check token" if code == 401 else "no answer"}
+    m = tcp_ms("100.76.195.46", 22)
+    omlx, _ = http("http://192.168.4.38:1234/v1/models", timeout=2)
+    out["mac"] = {"ok": m is not None, "word": ms(m) if m is not None else "ASLEEP",
+                  "sub": "oMLX up" if omlx else "oMLX off"}
+    states = (dock or {}).get("states", {})
+    up = sum(states.get(n) == "running" for n in TUNNELS)
+    site, _ = http("https://app.crcmz.me/", timeout=4)
+    out["tunnels"] = {"ok": up == len(TUNNELS) and site is not None and site < 500,
+                      "word": f"{up}/{len(TUNNELS)}", "sub": "crcmz.me up" if site and site < 500 else f"crcmz.me {site}" if site else "crcmz.me down"}
+    i = tcp_ms("1.1.1.1", 443)
+    dns = dns_ok()
+    out["internet"] = {"ok": i is not None and dns, "word": ms(i), "sub": "DNS ok" if dns else "DNS FAIL"}
+    return out
+
+
+class Slow(threading.Thread):
+    """Runs docker every 10 s and device checks every 15 s off the main loop."""
+
+    def __init__(self):
+        super().__init__(daemon=True)
+        self.docker, self.devices = None, None
+
+    def run(self):
+        last_dev = 0.0
+        while True:
+            self.docker = docker() or self.docker
+            if time.monotonic() - last_dev > 15:
+                try:
+                    self.devices = devices(self.docker)
+                except Exception as e:  # never let one probe kill the thread
+                    print(f"sysdeck: device check failed: {e}", file=sys.stderr)
+                last_dev = time.monotonic()
+            time.sleep(10)
+
+
+# -- rendering ----------------------------------------------------------------------
+def on_page():
+    try:
+        r = control.request(["status"], path=SOCK)
+    except (OSError, ValueError):
+        return False
+    return (r.get("profile") or r.get("status", {}).get("profile")) == PAGE
+
+
+class Painter:
+    def __init__(self):
+        self.key_sigs, self.panel_sigs, self.panels = {}, [None] * 4, [None] * 4
+
+    def paint(self, st):
+        from PIL import Image
+        changed = False
+        for tag, (sig, draw) in page_system.keys(st).items():
+            sig = json.dumps(sig)
+            if self.key_sigs.get(tag) != sig:
+                draw().save(os.path.join(OUT, f"key_{tag}.png.tmp"), "PNG")
+                os.replace(os.path.join(OUT, f"key_{tag}.png.tmp"), os.path.join(OUT, f"key_{tag}.png"))
+                self.key_sigs[tag] = sig
+                changed = True
+        if changed:
+            write_json(os.path.join(OUT, "keys.json"), self.key_sigs)
+        new = False
+        for i, (sig, draw) in enumerate(page_system.panels(st)):
+            if self.panel_sigs[i] != sig:
+                self.panels[i], self.panel_sigs[i], new = draw(), sig, True
+        if new:
+            frame = Image.new("RGB", (704, 124), (9, 11, 16))
+            for i, p in enumerate(self.panels):
+                frame.paste(p, (i * 176, 0))
+            frame.save(os.path.join(OUT, "strip.png.tmp"), "PNG")
+            os.replace(os.path.join(OUT, "strip.png.tmp"), os.path.join(OUT, "strip.png"))
+            write_json(os.path.join(OUT, "strip.json"), {"sigs": [str(hash(s)) for s in self.panel_sigs],
+                                                         "t": time.time()})
+
+
+def main():
+    os.makedirs(OUT, exist_ok=True)
+    local, slow, painter = Local(), Slow(), Painter()
+    slow.start()
+    n = 0
+    procs = ([], [])
+    while True:
+        t0 = time.monotonic()
+        if n % 2 == 0:
+            procs = local.procs()
+        st = {"ts": time.time(), "cpu": local.cpu(), "ram": local.ram(), "temp": local.temp(),
+              "disk": local.disk() if n % 5 == 0 or n == 0 else st.get("disk"), "net": local.net(),
+              "procs_cpu": procs[0], "procs_ram": procs[1], "docker": slow.docker, "devices": slow.devices}
+        if st["docker"]:
+            st["docker"] = {k: v for k, v in st["docker"].items() if k != "states"}
+        write_json(os.path.join(OUT, "state.json"), st)
+        if on_page():
+            try:
+                painter.paint(st)
+            except Exception as e:
+                print(f"sysdeck: paint failed: {e!r}", file=sys.stderr)
+        n += 1
+        time.sleep(max(0.2, TICK - (time.monotonic() - t0)))
+
+
+if __name__ == "__main__":
+    main()

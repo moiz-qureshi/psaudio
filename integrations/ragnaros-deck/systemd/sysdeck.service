@@ -1,0 +1,12 @@
+[Unit]
+Description=opti3 stats + device health for the Ragnaros deck's System page
+After=ragnarosd.service
+
+[Service]
+ExecStart=%h/.config/ragnaros/bin/sysdeck
+Restart=always
+RestartSec=3
+Nice=10
+
+[Install]
+WantedBy=default.target

@@ -185,7 +185,51 @@ def g_speaker(d, c, cx, cy, s):
         d.arc((cx - s * r, cy - s * r, cx + s * r * 1.6, cy + s * r), 300, 60, fill=c, width=int(s * 0.07))
 
 
-GLYPHS = {"bot": g_bot, "mic": g_mic, "bars": g_bars, "dots": g_dots, "alert": g_alert, "unlink": g_unlink,
+def g_box(d, c, cx, cy, s):              # container
+    w = int(s * 0.08)
+    d.polygon([(cx, cy - s * 0.5), (cx + s * 0.45, cy - s * 0.25), (cx + s * 0.45, cy + s * 0.27),
+               (cx, cy + s * 0.52), (cx - s * 0.45, cy + s * 0.27), (cx - s * 0.45, cy - s * 0.25)], outline=c, width=w)
+    d.line((cx - s * 0.45, cy - s * 0.25, cx, cy, cx + s * 0.45, cy - s * 0.25), fill=c, width=w, joint="curve")
+    d.line((cx, cy, cx, cy + s * 0.52), fill=c, width=w)
+
+
+def g_pi(d, c, cx, cy, s):               # a small board with a chip
+    w = int(s * 0.08)
+    d.rounded_rectangle((cx - s * 0.5, cy - s * 0.34, cx + s * 0.5, cy + s * 0.34), radius=s * 0.08, outline=c, width=w)
+    d.rectangle((cx - s * 0.16, cy - s * 0.14, cx + s * 0.16, cy + s * 0.14), fill=c)
+    for i in range(5):
+        x = cx - s * 0.36 + i * s * 0.18
+        d.ellipse((x - s * 0.03, cy - s * 0.26, x + s * 0.03, cy - s * 0.2), fill=c)
+
+
+def g_home(d, c, cx, cy, s):
+    w = int(s * 0.09)
+    d.line((cx - s * 0.5, cy - s * 0.02, cx, cy - s * 0.48, cx + s * 0.5, cy - s * 0.02), fill=c, width=w, joint="curve")
+    d.rounded_rectangle((cx - s * 0.34, cy - s * 0.1, cx + s * 0.34, cy + s * 0.46), radius=s * 0.06, outline=c, width=w)
+    d.rectangle((cx - s * 0.09, cy + s * 0.16, cx + s * 0.09, cy + s * 0.46), fill=c)
+
+
+def g_laptop(d, c, cx, cy, s):
+    w = int(s * 0.08)
+    d.rounded_rectangle((cx - s * 0.36, cy - s * 0.4, cx + s * 0.36, cy + s * 0.16), radius=s * 0.06, outline=c, width=w)
+    d.rounded_rectangle((cx - s * 0.52, cy + s * 0.24, cx + s * 0.52, cy + s * 0.34), radius=s * 0.05, fill=c)
+
+
+def g_cloud(d, c, cx, cy, s):
+    for (x, y, r) in ((-0.22, 0.06, 0.24), (0.06, -0.08, 0.3), (0.3, 0.1, 0.2)):
+        d.ellipse((cx + (x - r) * s, cy + (y - r) * s, cx + (x + r) * s, cy + (y + r) * s), fill=c)
+    d.rounded_rectangle((cx - s * 0.46, cy + s * 0.06, cx + s * 0.5, cy + s * 0.3), radius=s * 0.12, fill=c)
+
+
+def g_globe(d, c, cx, cy, s):
+    w = int(s * 0.07)
+    d.ellipse((cx - s * 0.45, cy - s * 0.45, cx + s * 0.45, cy + s * 0.45), outline=c, width=w)
+    d.ellipse((cx - s * 0.2, cy - s * 0.45, cx + s * 0.2, cy + s * 0.45), outline=c, width=w)
+    d.line((cx - s * 0.45, cy, cx + s * 0.45, cy), fill=c, width=w)
+
+
+GLYPHS = {"box": g_box, "pi": g_pi, "home": g_home, "laptop": g_laptop, "cloud": g_cloud, "globe": g_globe,
+          "bot": g_bot, "mic": g_mic, "bars": g_bars, "dots": g_dots, "alert": g_alert, "unlink": g_unlink,
           "stop": g_stop, "power": g_power, "flame": g_flame, "bulb": g_bulb, "hdmi": g_hdmi, "speaker": g_speaker}
 
 
@@ -208,6 +252,58 @@ def key_icon(caption, label, glyph, accent, active=True, dot=None, size=112):
     f = fit(d, label, 21 * SS, S - 22 * SS, 700)
     w = d.textlength(label, font=f)
     d.text(((S - w) / 2, S * 0.70), label, font=f, fill=TEXT + (255,) if active else DIM + (255,))
+    return img.convert("RGB").resize((size, size), Image.LANCZOS)
+
+
+def gauge_icon(caption, value, sub, frac, accent, dot=None, size=112):
+    """A live stat key: caption, a ring gauge with the value inside, one sub line."""
+    S = size * SS
+    acc = ACCENT.get(accent, accent)
+    img = Image.new("RGBA", (S, S), BG + (255,))
+    m = 4 * SS
+    d = card(img, (m, m, S - m, S - m), acc, active=True, radius=20 * SS)
+    d.text((14 * SS, 11 * SS), caption, font=fit(d, caption, 12 * SS, S - 40 * SS, 600), fill=acc + (255,))
+    if dot:
+        dc, r = ACCENT.get(dot, dot), 5 * SS
+        d.ellipse((S - 20 * SS - r, 17 * SS - r, S - 20 * SS + r, 17 * SS + r), fill=dc + (255,))
+    cx, cy, r, w = S / 2, S * 0.53, 30 * SS, 6 * SS
+    box = (cx - r, cy - r, cx + r, cy + r)
+    d.arc(box, 135, 405, fill=(36, 40, 56, 255), width=w)            # 270 degree track
+    if frac is not None and frac > 0:
+        end = 135 + 270 * max(0.02, min(1.0, frac))
+        glow_layer(img, lambda dd, col: dd.arc(box, 135, end, fill=col, width=w), acc, blur=2)
+    d = ImageDraw.Draw(img, "RGBA")
+    f = fit(d, value, 20 * SS, 2 * r - 12 * SS, 700)
+    tw = d.textlength(value, font=f)
+    d.text((cx - tw / 2, cy - 12 * SS), value, font=f, fill=TEXT + (255,))
+    if sub:
+        f2 = fit(d, sub, 11 * SS, S - 22 * SS, 600)
+        tw = d.textlength(sub, font=f2)
+        d.text(((S - tw) / 2, S - 25 * SS), sub, font=f2, fill=DIM + (255,))
+    return img.convert("RGB").resize((size, size), Image.LANCZOS)
+
+
+def status_icon(caption, word, glyph, ok, sub="", size=112, accent=None):
+    """A device key: green when up, red when down, with a short detail (latency)."""
+    accent = accent or ("green" if ok else "red" if ok is False else "slate")
+    S = size * SS
+    acc = ACCENT[accent]
+    img = Image.new("RGBA", (S, S), BG + (255,))
+    m = 4 * SS
+    d = card(img, (m, m, S - m, S - m), acc, active=ok is not None, radius=20 * SS)
+    d.text((14 * SS, 11 * SS), caption, font=fit(d, caption, 12 * SS, S - 40 * SS, 600), fill=acc + (255,))
+    r = 5 * SS
+    d.ellipse((S - 20 * SS - r, 17 * SS - r, S - 20 * SS + r, 17 * SS + r), fill=acc + (255,))
+    glow_layer(img, lambda dd, col: GLYPHS[glyph](dd, col, S / 2, S * 0.39, 30 * SS), acc if ok else DIM,
+               blur=3 if ok else 0.01)
+    d = ImageDraw.Draw(img, "RGBA")
+    f = fit(d, word, 18 * SS, S - 22 * SS, 700)
+    tw = d.textlength(word, font=f)
+    d.text(((S - tw) / 2, S * 0.585), word, font=f, fill=TEXT + (255,) if ok else acc + (255,))
+    if sub:
+        f2 = fit(d, sub, 10 * SS, S - 22 * SS, 600)
+        tw = d.textlength(sub, font=f2)
+        d.text(((S - tw) / 2, S - 21 * SS), sub, font=f2, fill=DIM + (255,))
     return img.convert("RGB").resize((size, size), Image.LANCZOS)
 
 
@@ -282,6 +378,26 @@ class Strip:
             out[-1] = out[-1].rstrip(".,") + "…"
         for j, line in enumerate(out):
             d.text((x0, (y + j * (size + 3)) * SS), line, font=f, fill=color + (255,))
+
+    def spark(self, i, values, accent, y=40, h=44, x=14, w=148, vmax=None, fill=True):
+        """Area sparkline of recent values (oldest first)."""
+        vals = [v for v in values if v is not None]
+        if len(vals) < 2:
+            return
+        acc = ACCENT.get(accent, accent)
+        top = vmax or max(max(vals), 1e-9)
+        x0 = i * self.PW * SS + x * SS
+        pts = [(x0 + j * w * SS / (len(vals) - 1), (y + h) * SS - min(1.0, v / top) * h * SS)
+               for j, v in enumerate(vals)]
+        layer = Image.new("RGBA", self.img.size, (0, 0, 0, 0))
+        ld = ImageDraw.Draw(layer)
+        if fill:
+            ld.polygon(pts + [(pts[-1][0], (y + h) * SS), (pts[0][0], (y + h) * SS)], fill=acc + (46,))
+        ld.line(pts, fill=acc + (255,), width=2 * SS, joint="curve")
+        self.img.alpha_composite(layer)
+        d = ImageDraw.Draw(self.img, "RGBA")
+        ex, ey = pts[-1]
+        d.ellipse((ex - 3 * SS, ey - 3 * SS, ex + 3 * SS, ey + 3 * SS), fill=acc + (255,))
 
     def image(self):
         return self.img.convert("RGB").resize((self.W, self.H), Image.LANCZOS)

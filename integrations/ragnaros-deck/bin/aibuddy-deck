@@ -44,7 +44,9 @@ def snapshot(st):
             "profile": (st.get("profile") or {}).get("label"), "session_on": st.get("session_on"),
             "mic_muted": st.get("mic_muted"), "question": (st.get("question") or "")[-200:],
             "reply": (st.get("reply") or "")[-400:], "ai_volume": st.get("ai_volume"),
-            "listening_source": st.get("listening_source")}
+            "listening_source": st.get("listening_source"),
+            "game_volume": st.get("game_volume"), "game_muted": st.get("game_muted"),
+            "headset_volume": st.get("headset_volume"), "headset_muted": st.get("headset_muted")}
     tmp = LIVE + ".tmp"
     try:
         with open(tmp, "w") as f:

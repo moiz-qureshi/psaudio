@@ -2,6 +2,8 @@
 # aibuddy - drive psaudio-buddy (Gemini voice on the PS5 audio Pi) from the deck.
 #   aibuddy press [roast] | release | stop | toggle | arm | disarm | vol up|down [N] | status
 #   aibuddy mic [toggle|mute|unmute]   headset mic to the PS5, switched on the Pi
+#   aibuddy headset up|down [N] | mute | <pct>   A50 X overall volume (game + soundboard + Hasaan)
+#   aibuddy game up|down [N] | mute | <pct>      PS5 game audio only
 #   aibuddy model next | <profile-id>    switch the AI model profile (managed on Deck Manager's AI page)
 # Token: ~/.config/ragnaros/secrets/aibuddy.env (BUDDY_URL, BUDDY_TOKEN), mode 600.
 set -u
@@ -18,7 +20,19 @@ case "${1:-status}" in
        esac ;;
   model) [[ "${2:-next}" =~ ^[a-z0-9][a-z0-9_-]{0,31}$ ]] || { echo "bad profile id" >&2; exit 2; }
          call "/profiles/${2:-next}/use" 15 ;;
-  mic) call "/mic?set=${2:-toggle}" ;;   # toggle on the Pi itself, so a quick double tap can't repeat
+  mic) call "/mic?set=${2:-toggle}" ;;
+  headset) case "${2:-}" in              # A50 X overall volume on the Pi (knob 2)
+          up) call "/headset?up=${3:-5}" ;;
+          down) call "/headset?down=${3:-5}" ;;
+          mute) call "/headset?mute=toggle" ;;
+          *) call "/headset?set=${2:-40}" ;;
+        esac ;;
+  game) case "${2:-}" in                 # PS5 game audio -> headset (game only)
+          up) call "/game?up=${3:-5}" ;;
+          down) call "/game?down=${3:-5}" ;;
+          mute) call "/game?mute=toggle" ;;
+          *) call "/game?set=${2:-100}" ;;
+        esac ;;   # toggle on the Pi itself, so a quick double tap can't repeat
   status) curl -s -m 3 -H "Authorization: Bearer $BUDDY_TOKEN" "$BUDDY_URL/status" ;;
   *) echo "usage: aibuddy press|release|stop|toggle|arm|disarm|vol up|down [N]|mic|model next|<id>|status" >&2; exit 2 ;;
 esac

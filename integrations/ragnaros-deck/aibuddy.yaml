@@ -104,3 +104,25 @@ actions:
     params:
       - {id: profile, label: Model profile, type: select, required: true, options_from: {url: /api/aibuddy/_options}}
     command: /home/opti3/.config/ragnaros/bin/aibuddy model {{profile|sh}}
+  - id: headset_knob
+    name: Headset volume
+    emoji: 🎧
+    description: Turn = A50 X overall volume on the Pi (5% steps, max 100), press = mute/unmute your mic to the PS5
+    for: [knob]
+    params:
+      - {id: step, label: Step %, type: number, default: 5, min: 1, max: 25}
+    knob:
+      cw: /home/opti3/.config/ragnaros/bin/aibuddy headset up {{step|int}}
+      ccw: /home/opti3/.config/ragnaros/bin/aibuddy headset down {{step|int}}
+      press: /home/opti3/.config/ragnaros/bin/aibuddy mic
+  - id: game_knob
+    name: PS5 game volume
+    emoji: 🎮
+    description: Turn = PS5 game audio only (5% steps), press = mute/unmute your mic to the PS5
+    for: [knob]
+    params:
+      - {id: step, label: Step %, type: number, default: 5, min: 1, max: 25}
+    knob:
+      cw: /home/opti3/.config/ragnaros/bin/aibuddy game up {{step|int}}
+      ccw: /home/opti3/.config/ragnaros/bin/aibuddy game down {{step|int}}
+      press: /home/opti3/.config/ragnaros/bin/aibuddy mic

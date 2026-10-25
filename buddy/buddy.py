@@ -607,6 +607,8 @@ class Buddy:
         self.press_t = 0.0
         self.max_listen_handle = None
         self.mic_is_muted = None
+        self.game = {"volume": None, "muted": None}   # PS5 game audio -> headset (loopback stream)
+        self.headset = {"volume": None, "muted": None}  # the A50 X sink: everything you hear
 
     # -- state -------------------------------------------------------------
     async def set_state(self, state, error=None):
@@ -643,6 +645,8 @@ class Buddy:
             "profile": {k: self.profile.get(k) for k in ("id", "label", "kind")},
             "model": self.model_name(), "voice": self.voice_name(),
             "ai_volume": self.cfg["ai_volume"], "mic_muted": self.mic_is_muted,
+            "game_volume": self.game["volume"], "game_muted": self.game["muted"],
+            "headset_volume": self.headset["volume"], "headset_muted": self.headset["muted"],
             "question": self.question, "reply": self.reply,
             "last_turn": self.history[-1] if self.history else None,
             "turns_measured": len(lat),
@@ -1496,12 +1500,51 @@ class Buddy:
         await self.end_listen()
         return len(data) / (IN_RATE * 2)
 
+    async def _game_stream(self):
+        """Index + state of the PS5 -> headset loopback (found by name; the index
+        changes whenever PipeWire restarts)."""
+        p = await asyncio.create_subprocess_exec("pactl", "-f", "json", "list", "sink-inputs",
+                                                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+        out, _ = await asyncio.wait_for(p.communicate(), 3)
+        for si in json.loads(out or b"[]"):
+            if si["properties"].get("node.name") == "ps5-game-out":
+                vol = list(si["volume"].values())[0]["value_percent"].rstrip("%")
+                return si["index"], int(vol), bool(si["mute"])
+        return None, None, None
+
+    async def _headset_state(self):
+        p = await asyncio.create_subprocess_exec("pactl", "get-sink-volume", self.cfg["headset_sink"],
+                                                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+        out, _ = await asyncio.wait_for(p.communicate(), 3)
+        m = re.search(r"(\d+)%", out.decode())
+        q = await asyncio.create_subprocess_exec("pactl", "get-sink-mute", self.cfg["headset_sink"],
+                                                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+        mo, _ = await asyncio.wait_for(q.communicate(), 3)
+        return (int(m.group(1)) if m else None), b"yes" in mo
+
+    async def headset_refresh(self):
+        vol, muted = await self._headset_state()
+        if (vol, muted) != (self.headset["volume"], self.headset["muted"]):
+            self.headset = {"volume": vol, "muted": muted}
+            self.bump()
+
+    async def game_refresh(self):
+        _, vol, muted = await self._game_stream()
+        if (vol, muted) != (self.game["volume"], self.game["muted"]):
+            self.game = {"volume": vol, "muted": muted}
+            self.bump()
+
     async def mic_watch(self):
         while True:
             muted = await self._mic_muted()
             if muted != self.mic_is_muted:
                 self.mic_is_muted = muted
                 self.bump()
+            try:
+                await self.game_refresh()
+                await self.headset_refresh()
+            except Exception:
+                pass
             await asyncio.sleep(2)
 
     async def idle_watch(self):
@@ -1793,6 +1836,52 @@ def make_app(b: Buddy):
         log.info("mic %s -> %s", want, "muted" if muted else "live")
         return web.json_response({"ok": True, "mic_muted": muted})
 
+    async def game_set(r):
+        """PS5 game audio into the headset: up=N | down=N | set=N | mute=toggle|1|0.
+        Only the game loopback moves; soundboard and Hasaan keep their own volumes."""
+        idx, vol, muted = await b._game_stream()
+        if idx is None:
+            return web.json_response({"ok": False, "error": "PS5 game audio stream not found"}, status=503)
+        q = r.query
+        args = None
+        if "mute" in q:
+            args = ["set-sink-input-mute", str(idx), {"toggle": "toggle", "1": "1", "0": "0"}.get(q["mute"], "toggle")]
+        else:
+            new = vol
+            if "set" in q:
+                new = int(q["set"])
+            elif "up" in q:
+                new = vol + int(q["up"] or 5)
+            elif "down" in q:
+                new = vol - int(q["down"] or 5)
+            new = max(0, min(150, new))
+            args = ["set-sink-input-volume", str(idx), f"{new}%"]
+        proc = await asyncio.create_subprocess_exec("pactl", *args)
+        await asyncio.wait_for(proc.wait(), 3)
+        await b.game_refresh()
+        return web.json_response({"ok": True, "game_volume": b.game["volume"], "game_muted": b.game["muted"]})
+
+    async def headset_set(r):
+        """The A50 X's overall volume on the Pi (game + soundboard + Hasaan):
+        up=N | down=N | set=N (0-100) | mute=toggle|1|0."""
+        vol, _ = await b._headset_state()
+        q = r.query
+        if "mute" in q:
+            args = ["set-sink-mute", cfg["headset_sink"], {"toggle": "toggle", "1": "1", "0": "0"}.get(q["mute"], "toggle")]
+        else:
+            new = vol or 0
+            if "set" in q:
+                new = int(q["set"])
+            elif "up" in q:
+                new += int(q["up"] or 5)
+            elif "down" in q:
+                new -= int(q["down"] or 5)
+            args = ["set-sink-volume", cfg["headset_sink"], f"{max(0, min(100, new))}%"]   # 100 max: ears
+        proc = await asyncio.create_subprocess_exec("pactl", *args)
+        await asyncio.wait_for(proc.wait(), 3)
+        await b.headset_refresh()
+        return web.json_response({"ok": True, "headset_volume": b.headset["volume"], "headset_muted": b.headset["muted"]})
+
     async def ack_get(r):
         c = b.ack_conf()
         return web.json_response({"ok": True, "enabled": c["enabled"], "text": c["text"],
@@ -1930,7 +2019,7 @@ def make_app(b: Buddy):
         web.get("/personality", personality_get), web.put("/personality", personality_put),
         web.get("/mcp", mcp_get), web.put("/mcp", mcp_put),
         web.get("/ack", ack_get), web.put("/ack", ack_put),
-        web.post("/mic", mic_set),
+        web.post("/mic", mic_set), web.post("/game", game_set), web.post("/headset", headset_set),
         web.get("/fillers", fillers_get), web.put("/fillers", fillers_put),
         web.get("/roast", roast_get), web.put("/roast", roast_put),
         web.post("/voices/{name:[a-z0-9][a-z0-9_-]{0,31}}/record", voice_record),

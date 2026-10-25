@@ -1354,12 +1354,18 @@ def make_app(b: Buddy):
         both ends, loudness evened out, at most 30 s. The voice copy imitates
         whatever it is given, so a clean, even sample matters more than length."""
         trim = "silenceremove=start_periods=1:start_threshold=-45dB:start_silence=0.15"
-        proc = await asyncio.create_subprocess_exec(
-            "ffmpeg", "-hide_banner", "-loglevel", "error", "-i", "pipe:0", "-vn", "-ac", "1",
-            "-af", f"highpass=f=70,{trim},areverse,{trim},areverse,loudnorm=I=-19:TP=-2:LRA=11",
-            "-ar", "24000", "-sample_fmt", "s16", "-t", "30", "-f", "wav", "pipe:1",
-            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-        out, err = await asyncio.wait_for(proc.communicate(raw), 60)
+        import tempfile
+        # a real file, not a pipe: m4a from Voice Memos keeps its index at the end
+        with tempfile.NamedTemporaryFile(dir=STATE_DIR, suffix=".upload") as tmp:
+            os.chmod(tmp.name, 0o600)
+            tmp.write(raw)
+            tmp.flush()
+            proc = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-i", tmp.name, "-vn", "-ac", "1",
+                "-af", f"highpass=f=70,{trim},areverse,{trim},areverse,loudnorm=I=-19:TP=-2:LRA=11",
+                "-ar", "24000", "-sample_fmt", "s16", "-t", "30", "-f", "wav", "pipe:1",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            out, err = await asyncio.wait_for(proc.communicate(), 60)
         if proc.returncode != 0 or len(out) < 1000:
             raise ValueError("couldn't read that audio file: " + err.decode(errors="ignore")[-120:].strip())
         # ffmpeg streams an unknown length into the header; fix the sizes so wave/oMLX can read it

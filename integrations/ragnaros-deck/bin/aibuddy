@@ -19,9 +19,9 @@ case "${1:-status}" in
   model) [[ "${2:-next}" =~ ^[a-z0-9][a-z0-9_-]{0,31}$ ]] || { echo "bad profile id" >&2; exit 2; }
          call "/profiles/${2:-next}/use" 15 ;;
   mic) if curl -s -m 3 -H "Authorization: Bearer $BUDDY_TOKEN" "$BUDDY_URL/status" | grep -q '"mic_muted": true'; then
-         "$HOME/.config/ragnaros/bin/psaudio" mic_unmute && ragnarosctl toast "MIC" "live to PS5" --seconds=2
+         "$HOME/.config/ragnaros/bin/psaudio" mic_unmute   # the live strip shows the new state, no toast
        else
-         "$HOME/.config/ragnaros/bin/psaudio" mic_mute && ragnarosctl toast "MIC" "muted" --seconds=2
+         "$HOME/.config/ragnaros/bin/psaudio" mic_mute
        fi ;;
   status) curl -s -m 3 -H "Authorization: Bearer $BUDDY_TOKEN" "$BUDDY_URL/status" ;;
   *) echo "usage: aibuddy press|release|stop|toggle|arm|disarm|vol up|down [N]|mic|model next|<id>|status" >&2; exit 2 ;;

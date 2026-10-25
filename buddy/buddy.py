@@ -1420,8 +1420,8 @@ def make_app(b: Buddy):
     async def voice_put(r):
         name = r.match_info["name"]
         data = await r.read()
-        if not 1000 < len(data) <= 5_000_000:
-            return web.json_response({"ok": False, "error": "send an audio file (wav, m4a, mp3...) under 5 MB"}, status=400)
+        if not 1000 < len(data) <= 35_000_000:
+            return web.json_response({"ok": False, "error": "send an audio file (wav, aiff, m4a, mp3...) under 35 MB"}, status=400)
         try:
             v = await _save_voice(name, data, r.query.get("text", "").strip())
         except Exception as e:
@@ -1454,7 +1454,7 @@ def make_app(b: Buddy):
     async def health(r):
         return web.json_response({"ok": True, "state": b.state})
 
-    app = web.Application(middlewares=[guard], client_max_size=6 * 1024 * 1024)
+    app = web.Application(middlewares=[guard], client_max_size=40 * 1024 * 1024)
     app.add_routes([
         web.post("/press", press), web.post("/release", release),
         web.post("/talk/start", talk_start), web.post("/talk/end", talk_end),

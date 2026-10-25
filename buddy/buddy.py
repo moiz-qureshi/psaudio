@@ -777,7 +777,7 @@ class Buddy:
                                      headers={"Authorization": f"Bearer {self.cfg['omlx_key']}"})
                     r.raise_for_status()
                     raw = r.content
-            trim = "silenceremove=start_periods=1:start_threshold=-42dB"
+            trim = "silenceremove=start_periods=1:start_threshold=-55dB"   # a hum starts softly; keep it all
             out.parent.mkdir(parents=True, exist_ok=True)
             proc = await asyncio.create_subprocess_exec(
                 "ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", "pipe:0", "-ac", "1",

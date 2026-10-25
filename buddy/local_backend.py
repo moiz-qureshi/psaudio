@@ -263,10 +263,16 @@ async def catalog(cfg, profiles):
 def _msg(**sc):
     """A stand-in for google.genai's LiveServerMessage with just what buddy reads."""
     content = NS(model_turn=None, turn_complete=False, interrupted=False, generation_complete=False,
-                 input_transcription=None, output_transcription=None)
+                 input_transcription=None, output_transcription=None, error=None)
     for k, v in sc.items():
         setattr(content, k, v)
     return NS(session_resumption_update=None, go_away=None, usage_metadata=None, server_content=content)
+
+
+def tts_token_cap(text):
+    """Upper bound on audio tokens for a phrase (Qwen3-TTS runs at 12 tokens per second
+    of speech): ~3x the time the text should take, so it can never run on."""
+    return max(48, min(600, 24 + int(len(text) * 1.6)))
 
 
 def pcm_to_wav(pcm, rate):
@@ -305,7 +311,7 @@ class LocalSession:
         base = profile["base_url"].rstrip("/")
         self.base = base
         self.client = httpx.AsyncClient(
-            timeout=httpx.Timeout(30, connect=4),
+            timeout=httpx.Timeout(20, connect=4),
             headers={"Authorization": f"Bearer {cfg.get('omlx_key', '')}"},
             limits=httpx.Limits(max_keepalive_connections=4))
 
@@ -341,7 +347,7 @@ class LocalSession:
                     "chat_template_kwargs": {"enable_thinking": False}})]
         if self.p["tts_provider"] == "omlx":
             jobs.append(self.client.post(self.base + "/audio/speech", json={
-                "model": self.p["tts_model"], "input": "ok", "voice": self.p["tts_voice"],
+                "model": LOCAL_DEFAULTS["tts_model"], "input": "ok", "voice": LOCAL_DEFAULTS["tts_voice"],
                 "response_format": "wav"}))
         await asyncio.gather(*jobs, return_exceptions=True)
         log.info("local models warm in %.0f ms", (time.monotonic() - t) * 1000)
@@ -376,13 +382,14 @@ class LocalSession:
                 "chat_template_kwargs": {"enable_thinking": False}}), 3)
         except Exception:
             pass
-        tts = self.p.get("tts_model") or LOCAL_DEFAULTS["tts_model"]
         while True:
             await asyncio.sleep(1.0)
             try:
+                # always Kokoro: a voice-copy model with no sample can run on and jam
+                # oMLX's audio queue (that is what stuck the buddy on "thinking")
                 await asyncio.wait_for(self.client.post(self.base + "/audio/speech", json={
-                    "model": tts, "input": "k", "voice": self.p.get("tts_voice") or "am_puck",
-                    "response_format": "wav"}), 2)
+                    "model": LOCAL_DEFAULTS["tts_model"], "input": "k",
+                    "voice": LOCAL_DEFAULTS["tts_voice"], "response_format": "wav"}), 2)
             except Exception:
                 pass
 
@@ -418,8 +425,12 @@ class LocalSession:
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            log.warning("local turn failed: %s", e)
-            await self.out.put(_msg(output_transcription=NS(text=f"[local error: {type(e).__name__} {str(e)[:80]}]")))
+            why = ("MacBook busy (oMLX not answering)" if isinstance(e, httpx.TimeoutException)
+                   else "MacBook unreachable" if isinstance(e, httpx.ConnectError)
+                   else f"local: {type(e).__name__} {str(e)[:80]}")
+            log.warning("local turn failed: %s (%r)", why, e)
+            await self.out.put(_msg(turn_complete=True, error=why))
+            return
         await self.out.put(_msg(turn_complete=True))
 
     async def _run(self, pcm):
@@ -564,7 +575,7 @@ class LocalSession:
         """oMLX streams one WAV header then raw PCM as it is generated; pass the
         audio on as it arrives instead of waiting for the whole phrase."""
         body = {"model": self.p["tts_model"], "input": text, "voice": self.p.get("tts_voice") or None,
-                "response_format": "wav", "stream": True}
+                "response_format": "wav", "stream": True, "max_tokens": tts_token_cap(text)}
         ref = voice_ref(self.p.get("ref_voice", "")) if "tts" in self.p["tts_model"].lower() and \
             "kokoro" not in self.p["tts_model"].lower() else None
         if ref:

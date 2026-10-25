@@ -765,7 +765,7 @@ class Buddy:
                     raw = r.content
                 else:
                     body = {"model": p["tts_model"], "input": text, "voice": p.get("tts_voice"),
-                            "response_format": "wav"}
+                            "response_format": "wav", "max_tokens": local_backend.tts_token_cap(text)}
                     ref = local_backend.voice_ref(p.get("ref_voice", "")) if "kokoro" not in p["tts_model"].lower() else None
                     if ref:
                         body["ref_audio"], body["ref_text"] = ref
@@ -1060,6 +1060,9 @@ class Buddy:
                 self.turn["question"] = self.question[-300:]
                 self.turn["reply"] = self.reply[-500:]
                 self._log_turn()
+            if getattr(sc, "error", None):
+                await self.set_state("error", sc.error)       # visible on the key + strip toast
+                return
             if self.state == "speaking" and not self.player.busy():
                 await self.set_state("ready" if self.armed or self.session_on else "off")
             if self.state == "thinking":   # finished without any audio
@@ -1308,6 +1311,7 @@ class Buddy:
         """Squad wake only when nobody is asking and the AI has been quiet a moment,
         so its own voice coming back through a friend's speakers can't trigger it."""
         return (self.session_on and not self.listening and not self.player.busy()
+                and self.state not in ("thinking", "speaking")
                 and time.monotonic() > self.player.last_audio + self.cfg["wake"]["squad_holdoff_s"])
 
     def _chime(self, to_squad):

@@ -1,10 +1,10 @@
-"""crcmz MCP for psaudio-buddy: read-only squad knowledge for the voice AI.
+"""crcmz MCP for psaudio-buddy: everything the crcmz token grants, for the voice AI.
 
 A minimal Streamable-HTTP MCP client (JSON-RPC over POST) for app.crcmz.me/mcp,
-authenticated with your personal crcmz token (Settings -> MCP). Only *read*
-tools are ever offered to the model: the voice can be triggered by anyone in
-party chat saying "Hey Hasaan", so it must never be able to post as you. Write
-tools are blocked by name and by pattern, even if someone ticks them.
+authenticated with your personal crcmz token (Settings -> MCP). Every read tool
+the server grants is offered, new ones included; write tools start switched off
+(testing showed the model sends without waiting for a confirmation). Write tools are recognised (by name and pattern) so the
+buddy can confirm before using one and refuse it for voices other than yours.
 """
 import asyncio
 import json
@@ -96,18 +96,16 @@ class CrcmzMCP:
         self.ready = True
 
     async def tools(self, force=False):
-        """All tools the token can see, write tools removed (cached 10 min)."""
+        """All tools the token can see, writes included (cached 10 min)."""
         if force or self._tools is None or time.monotonic() - self._tools_t > 600:
             if not self.ready:
                 await self.start()
             res = await self.rpc("tools/list")
-            self._tools = [t for t in res.get("tools", []) if not is_write(t.get("name", ""))]
+            self._tools = list(res.get("tools", []))
             self._tools_t = time.monotonic()
         return self._tools
 
     async def call(self, name, args):
-        if is_write(name):
-            return "refused: this voice assistant is read-only"
         t = time.monotonic()
         try:
             res = await self.rpc("tools/call", {"name": name, "arguments": args or {}})
@@ -140,9 +138,13 @@ def clean_schema(schema):
     return out
 
 
-def selected(all_tools, chosen):
-    names = set(chosen or DEFAULT_TOOLS)
-    return [t for t in all_tools if t["name"] in names and not is_write(t["name"])]
+def selected(all_tools, conf):
+    """Everything granted, minus what was explicitly unticked (conf["disabled"])."""
+    if conf.get("mode", "all") == "all":
+        off = set(conf.get("disabled") or [])
+        return [t for t in all_tools if t["name"] not in off]
+    names = set(conf.get("tools") or DEFAULT_TOOLS)          # older allow-list configs
+    return [t for t in all_tools if t["name"] in names]
 
 
 def gemini_declarations(tools):
@@ -170,4 +172,8 @@ TOOL_HINT = (" You can look things up in the squad's CRCMZ app (members, profile
              "if you need to work out who a name refers to. Never read out phone numbers, "
              "addresses or private messages word for word; summarise and roast instead. "
              "A short 'let me look that up' line is played for you automatically when you "
-             "use a tool, so don't announce lookups yourself; just give the answer.")
+             "use a tool, so don't announce lookups yourself; just give the answer. "
+             "Some tools SEND or CHANGE things (messages to WhatsApp, PSN or Mattermost, ringing "
+             "the squad, tasks, songs, builds). Before calling one of those, say in one sentence "
+             "exactly what you'll send or change and where, and only call it after the person "
+             "says yes in their next message.")

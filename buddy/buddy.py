@@ -699,7 +699,21 @@ class Buddy:
         c.setdefault("enabled", False)
         c.setdefault("url", "https://app.crcmz.me/mcp")
         c.setdefault("tools", list(mcp_client.DEFAULT_TOOLS))
+        if c.get("mode") != "all":            # default: every granted tool, writes included
+            c["mode"] = "all"
+        c.setdefault("disabled", sorted(mcp_client.WRITE_TOOLS))   # write tools start off
+        c.setdefault("write_from", "me")      # "me" = writes only from Moiz's mic / keys
         return c
+
+    def may_write(self, name):
+        """Can the current turn use write tool `name`? Writes only for your own voice,
+        unless write_from is "anyone"; a squad (PS5 chat) wake gets read tools only."""
+        if not mcp_client.is_write(name):
+            return True
+        if self.mcp_conf()["write_from"] == "anyone":
+            return True
+        src = getattr(self, "_test_source", None) or (self.turn or {}).get("source") or self.listen_source
+        return src in ("mic", "file")
 
     async def mcp_tools(self):
         """The crcmz read tools to offer this session ([] when off or unreachable).
@@ -712,7 +726,7 @@ class Buddy:
                 if self.mcp:
                     await self.mcp.close()
                 self.mcp = mcp_client.CrcmzMCP(c["url"], self.cfg["crcmz_token"])
-            tools = mcp_client.selected(await asyncio.wait_for(self.mcp.tools(), 10), c["tools"])
+            tools = mcp_client.selected(await asyncio.wait_for(self.mcp.tools(), 10), c)
             self.mcp_error = None
             return tools
         except Exception as e:
@@ -986,7 +1000,7 @@ class Buddy:
             return local_backend.LocalSession(dict(self.cfg, system_instruction=self.personality() + hint),
                                               p, self.local_history, self._stage,
                                               mcp=self.mcp if self.live_tools else None, tools=self.live_tools,
-                                              on_tool=self.play_filler)
+                                              on_tool=self.play_filler, may_write=self.may_write)
         return client.aio.live.connect(model=p["model"], config=self.live_config())
 
     async def _session_loop(self):
@@ -1250,6 +1264,7 @@ class Buddy:
                      "model": self.model_name(), "profile": self.profile["id"],
                      "connected_at_press": self.session_ready.is_set()}
         self.listen_mode = mode
+        self.turn["source"] = source
         if mode == "roast":
             self.turn["mode"] = "roast"
             c = self.roast_conf()
@@ -1574,7 +1589,10 @@ def make_app(b: Buddy):
         p = pathlib.Path(body["file"]).resolve()
         if not str(p).startswith(str(STATE_DIR / "test")):
             return web.json_response({"ok": False, "error": "test files live in state/test"}, status=400)
+        if body.get("as_source") == "squad":          # test hook: pretend a squad voice asked
+            b._test_source = "squad"
         secs = await b.feed_file(p, mode="roast" if body.get("mode") == "roast" else "")
+        b._test_source = None
         return web.json_response({"ok": True, "fed_s": secs, **b.status()})
 
     async def profiles_get(r):
@@ -1804,6 +1822,7 @@ def make_app(b: Buddy):
     async def mcp_get(r):
         c = b.mcp_conf()
         out = {"ok": True, "enabled": c["enabled"], "url": c["url"], "selected": c["tools"],
+               "mode": c["mode"], "disabled": c["disabled"], "write_from": c["write_from"],
                "defaults": mcp_client.DEFAULT_TOOLS, "token_set": bool(cfg["crcmz_token"]),
                "tools_in_session": len(b.live_tools), "tools": [], "error": b.mcp_error}
         if cfg["crcmz_token"]:
@@ -1811,7 +1830,9 @@ def make_app(b: Buddy):
                 if b.mcp is None or b.mcp.token != cfg["crcmz_token"] or b.mcp.url != c["url"]:
                     b.mcp = mcp_client.CrcmzMCP(c["url"], cfg["crcmz_token"])
                 tools = await asyncio.wait_for(b.mcp.tools(force="refresh" in r.query), 12)
-                out["tools"] = [{"name": t["name"], "description": (t.get("description") or "")[:220]}
+                off = set(c.get("disabled") or [])
+                out["tools"] = [{"name": t["name"], "description": (t.get("description") or "")[:220],
+                                 "write": mcp_client.is_write(t["name"]), "enabled": t["name"] not in off}
                                 for t in tools]
                 out["error"] = None
             except Exception as e:
@@ -1834,8 +1855,10 @@ def make_app(b: Buddy):
             c["enabled"] = bool(body["enabled"])
         if "url" in body and str(body["url"]).startswith("https://"):
             c["url"] = str(body["url"])
-        if isinstance(body.get("tools"), list):
-            c["tools"] = [str(n) for n in body["tools"] if not mcp_client.is_write(str(n))][:40]
+        if isinstance(body.get("disabled"), list):
+            c["disabled"] = [str(n) for n in body["disabled"]][:200]
+        if body.get("write_from") in ("me", "anyone"):
+            c["write_from"] = body["write_from"]
         b.profiles.save()
         if b.session_task and not b.session_task.done():
             await b.use_profile(b.profile["id"])          # new tool set takes effect on reconnect

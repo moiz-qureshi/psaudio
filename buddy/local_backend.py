@@ -298,10 +298,11 @@ def _wav_to_pcm24k(data):
 
 
 class LocalSession:
-    def __init__(self, cfg, profile, history, on_stage, mcp=None, tools=None, on_tool=None):
+    def __init__(self, cfg, profile, history, on_stage, mcp=None, tools=None, on_tool=None, may_write=None):
         self.cfg, self.p = cfg, profile
         self.on_tool = on_tool            # buddy plays a pre-rendered "let me look that up"
         self.turn_mode = {}               # set by the buddy at the end of each question (ROAST key)
+        self.may_write = may_write or (lambda name: True)   # writes only for allowed voices
         self.mcp = mcp                    # crcmz MCP client (read-only tools), or None
         self.tools = tools or []
         self.history = history            # deque of (user, assistant), bounded by the buddy
@@ -379,9 +380,11 @@ class LocalSession:
         then a one-letter Kokoro request every second (~0.08 s of GPU, and the
         cheapest thing to collide with when the real request arrives)."""
         try:
-            await asyncio.wait_for(self.client.post(self.base + "/chat/completions", json={
-                "model": self.p["llm"], "max_tokens": 1, "messages": self._messages("..."),
-                "chat_template_kwargs": {"enable_thinking": False}}), 3)
+            body = {"model": self.p["llm"], "max_tokens": 1, "messages": self._messages("..."),
+                    "chat_template_kwargs": {"enable_thinking": False}}
+            if self.tools and self.mcp:
+                body["tools"] = openai_tools(self.tools)       # cache the same prefix as the real call
+            await asyncio.wait_for(self.client.post(self.base + "/chat/completions", json=body), 8)
         except Exception:
             pass
         while True:
@@ -489,7 +492,12 @@ class LocalSession:
                 msgs.append({"role": "assistant", "content": text_out or None, "tool_calls": [
                     {"id": c["id"], "type": "function", "function": {"name": c["name"], "arguments": c["args"]}}
                     for c in calls]})
-                results = await asyncio.gather(*(self.mcp.call(c["name"], _json_args(c["args"])) for c in calls))
+                async def run(c):
+                    if not self.may_write(c["name"]):
+                        return ("refused: only Moiz can ask me to send or change things; "
+                                "tell whoever asked that they can't make you do that")
+                    return await self.mcp.call(c["name"], _json_args(c["args"]))
+                results = await asyncio.gather(*(run(c) for c in calls))
                 for c, res in zip(calls, results):
                     msgs.append({"role": "tool", "tool_call_id": c["id"], "name": c["name"], "content": res})
             await sentences.put(None)

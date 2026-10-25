@@ -177,10 +177,20 @@ def gemini_declarations(tools):
             for t in tools]
 
 
+def _lean(schema):
+    """Smaller schema for the voice model: short param descriptions (prompt size is
+    most of the time to first word)."""
+    sch = clean_schema(schema)
+    for v in (sch.get("properties") or {}).values():
+        if isinstance(v, dict) and isinstance(v.get("description"), str):
+            v["description"] = v["description"][:70]
+    return sch
+
+
 def openai_tools(tools):
     return [{"type": "function", "function": {"name": t["name"],
-                                              "description": (t.get("description") or "")[:900],
-                                              "parameters": clean_schema(t.get("inputSchema"))}}
+                                              "description": (t.get("description") or "")[:200],
+                                              "parameters": _lean(t.get("inputSchema"))}}
             for t in tools]
 
 

@@ -49,11 +49,12 @@ def split_ready(text, first):
     return None, text
 THINK = re.compile(r"<think>.*?</think>\s*", re.S)
 EMBED_MODEL = "Qwen3-Embedding-4B-4bit-DWQ"
-JITTER_S = 0.8                # audio buffered before a take starts playing
+JITTER_S = 0.5                # audio buffered before a take starts playing
 PERSON_Q = re.compile(r"\b(?:who\s+is|who's|whos|who\s+the\s+(?:hell|fuck)\s+is|tell\s+me\s+about|"
                       r"(?:a\s+)?facts?\s+about|what\s+do\s+you\s+know\s+about|what's\s+up\s+with|roast)\s+"
                       r"(?P<name>[\w.'@-]+(?:\s+[\w.'@-]+){0,2})", re.I)
-ROUTE_TOP = 8                 # tools offered per question (all stay available; each step stays small)
+ROUTE_TOP = 5                 # tools offered per question (all stay available; each step stays small)
+PREFETCH_SIM = 0.55           # a no-argument tool this close to the question is just fetched
 ROUTE_ALWAYS = ("squad_roster", "person_profile", "squad_facts", "memory_search")   # people questions
 LOOKUP_HINT = re.compile(
     r"\b(who|whose|when|where|which|how (many|much|long|often)|stats?|k ?d|kills?|deaths?|wins?|"
@@ -348,6 +349,7 @@ class LocalSession:
         self.turn_mode = {}               # set by the buddy at the end of each question (ROAST key)
         self.may_write = may_write or (lambda name: True)   # writes only for allowed voices
         self.tool_vecs = None             # embeddings of the tool descriptions, for routing
+        self.prefetch = []                # no-argument tools the router is sure about
         self.vocab = "Hasaan"             # names Whisper should expect (squad, gamertags, trip)
         self.vocab_t = 0.0
         self.names = []                   # every known person name/alias, for fixing lookups
@@ -513,6 +515,10 @@ class LocalSession:
             names = {self.tools[i]["name"] for i in order} | set(ROUTE_ALWAYS)
             picked = [t for t in self.tools if t["name"] in names]
             likely = bool(LOOKUP_HINT.search(text)) or float(sims.max()) > 0.55
+            self.prefetch = [self.tools[i] for i in order[:2]
+                             if sims[i] >= PREFETCH_SIM and not (self.tools[i].get("inputSchema") or {}).get("required")
+                             and self.tools[i]["name"] not in ROUTE_ALWAYS]
+            log.info("route %r: %s", text[:50], [(self.tools[i]["name"], round(float(sims[i]), 2)) for i in order[:3]])
             return picked, likely
         except Exception as e:
             log.warning("tool routing failed (offering all tools): %s", e)
@@ -566,12 +572,8 @@ class LocalSession:
         the real system prompt + history (leaves that prefix in oMLX's cache),
         then a one-letter Kokoro request every second (~0.08 s of GPU, and the
         cheapest thing to collide with when the real request arrives)."""
-        try:
-            body = {"model": self.p["llm"], "max_tokens": 1, "messages": self._messages("..."),
-                    "chat_template_kwargs": {"enable_thinking": False}}
-            await asyncio.wait_for(self.client.post(self.base + "/chat/completions", json=body), 8)
-        except Exception:
-            pass
+        # (no chat-model prime here: oMLX caches in 4096-token blocks, so it never
+        # helped, and it made the real question queue behind it for 1-2 s)
         while True:
             await asyncio.sleep(1.0)
             try:
@@ -668,9 +670,24 @@ class LocalSession:
         reply = ""
         try:
             filled = False
+            self.turn_tools = []                       # tool schemas cost ~1.2k prompt tokens: only when needed
             if self.tools and self.mcp and not roast:
                 self.active_tools, likely = await self._route(text)
                 self.on_stage("routed_ms")
+                if self.prefetch:
+                    got = await asyncio.gather(*(self.mcp.call(t["name"], {}) for t in self.prefetch),
+                                               return_exceptions=True)
+                    ctx = [f'{t["name"]}: {r[:1500]}' for t, r in zip(self.prefetch, got)
+                           if isinstance(r, str) and not r.startswith("error")]
+                    if ctx:
+                        msgs.insert(-1, {"role": "system", "content":
+                                         "(Fetched for this question before you answered:)\n" + "\n".join(ctx)})
+                        self.on_stage("prefetch_ms")
+                fetched = bool(people_ctx) or any("Fetched for this question" in m.get("content", "")
+                                                  for m in msgs if m["role"] == "system")
+                # data already in hand -> answer from it; a data question -> offer the routed
+                # tools; banter -> no tools at all (the smallest, fastest prompt)
+                self.turn_tools = [] if fetched else (self.active_tools if likely else [])
                 if likely and self.on_tool:            # say "let me look that up" now, not after
                     self.on_tool()                     # the model has spent seconds deciding
                     filled = True
@@ -688,6 +705,10 @@ class LocalSession:
                 text_out, calls = await self._stream_llm(msgs, sentences, first_reply=not reply,
                                                          roast=roast, tools_on=not last)
                 reply = (reply + " " + text_out).strip() if text_out else reply
+                if not calls and not last and self.mcp and text_out and PROMISE.search(text_out) and not self.turn_tools:
+                    self.turn_tools = self.active_tools or self.tools   # it wants to look: give it the tools
+                    msgs.append({"role": "assistant", "content": text_out})
+                    continue
                 if not calls and not last and self.mcp and text_out and PROMISE.search(text_out):
                     # it promised to look something up but didn't: make it follow through
                     msgs.append({"role": "assistant", "content": text_out})
@@ -748,8 +769,11 @@ class LocalSession:
                                 else min(0.4, float(self.p.get("temperature", 0.8))) if (tools_on and self.tools and self.mcp)
                                 else float(self.p.get("temperature", 0.8))),   # decide calmly, answer with flair
                 "chat_template_kwargs": {"enable_thinking": False}}
-        if self.tools and self.mcp and not roast and tools_on:
-            body["tools"] = openai_tools(self.active_tools or self.tools)
+        offered = getattr(self, "turn_tools", None)
+        if offered is None:
+            offered = self.active_tools or self.tools
+        if self.mcp and not roast and tools_on and offered:
+            body["tools"] = openai_tools(offered)
         reply, pending, in_think, calls, muted, raw_call = "", "", False, {}, False, ""
         async with self.client.stream("POST", self.base + "/chat/completions", json=body) as resp:
             resp.raise_for_status()

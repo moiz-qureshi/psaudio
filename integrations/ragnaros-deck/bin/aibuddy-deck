@@ -1,0 +1,77 @@
+#!/usr/bin/env python3
+"""Mirror psaudio-buddy's state onto the deck: long-polls the Pi and swaps the
+icons of keys tagged `state: aibuddy` / `state: aisession` / `state: aivol`
+through ragnarosd-plus's `keystate` verb. Errors also show as a strip toast."""
+import json
+import os
+import subprocess
+import time
+import urllib.request
+
+from ragnaros import control
+
+ENV = os.path.expanduser("~/.config/ragnaros/secrets/aibuddy.env")
+SOCK = os.path.expanduser("~/.local/state/ragnaros-plus/ctl.sock")
+
+
+def env():
+    out = {}
+    for line in open(ENV):
+        if "=" in line and not line.startswith("#"):
+            k, v = line.strip().split("=", 1)
+            out[k] = v.strip('"')
+    return out
+
+
+def ctl(*argv):
+    try:
+        control.request(list(argv), path=SOCK)
+    except (OSError, ValueError):
+        pass
+
+
+def toast(title, body):
+    subprocess.Popen(["ragnarosctl", "toast", title, body, "--seconds=4"],
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def main():
+    e = env()
+    url, token = e["BUDDY_URL"], e["BUDDY_TOKEN"]
+    seq, last, last_err, last_vol, last_wake, last_session = -1, None, None, None, None, None
+    while True:
+        try:
+            req = urllib.request.Request(f"{url}/status?since={seq}&wait=25",
+                                         headers={"Authorization": f"Bearer {token}"})
+            st = json.load(urllib.request.urlopen(req, timeout=35))
+            seq = st["seq"]
+            state = st["state"]
+            if state != last:
+                ctl("keystate", "aibuddy", state)
+                last = state
+            session = "on" if st.get("session_on") else "off"
+            if session != last_session:
+                ctl("keystate", "aisession", session)
+                if last_session is not None:
+                    toast("AI SESSION", "say \"Hey Hasaan\"" if session == "on" else "off")
+                last_session = session
+            wake = (st.get("wake") or {}).get("last")
+            if wake and wake != last_wake and last_wake is not None and wake.get("source") == "squad":
+                toast("HASAAN", "listening to the squad")
+            last_wake = wake or {}
+            if state == "error" and st.get("error") != last_err:
+                toast("AI BUDDY", st.get("error") or "error")
+            last_err = st.get("error") if state == "error" else None
+            if last_vol is not None and st["ai_volume"] != last_vol:
+                toast("AI VOLUME", f"{st['ai_volume']}%")
+            last_vol = st["ai_volume"]
+        except Exception:
+            if last != "offline":
+                ctl("keystate", "aibuddy", "offline")
+                last = "offline"
+            seq = -1
+            time.sleep(3)
+
+
+if __name__ == "__main__":
+    main()

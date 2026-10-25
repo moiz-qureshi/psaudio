@@ -1,0 +1,76 @@
+id: aibuddy
+name: AI Buddy
+emoji: 🤖
+color: "#22d3ee"
+order: 31
+description: Gemini Live voice buddy on the PS5 audio Pi — hold to ask, heard in the headset and by the squad
+health:
+  http: http://192.168.5.151:8766/health
+match:
+  - 'bin/aibuddy'
+recognize:
+  - {pattern: 'bin/aibuddy press$', action: talk}
+  - {pattern: 'bin/aibuddy stop$', action: stop}
+  - {pattern: 'bin/aibuddy toggle$', action: session}
+  - {pattern: 'bin/aibuddy vol up', action: vol_up}
+  - {pattern: 'bin/aibuddy vol down', action: vol_down}
+  - {pattern: 'bin/aibuddy mic$', action: mic}
+
+actions:
+  - id: talk
+    name: AI BUDDY (hold to talk)
+    emoji: 🎙️
+    description: Hold to speak, release to send (or tap to start, tap to send). Icon shows the state.
+    for: [key]
+    icon: icons/aibuddy_off.png
+    spec:
+      action: /home/opti3/.config/ragnaros/bin/aibuddy press
+      release: /home/opti3/.config/ragnaros/bin/aibuddy release
+      state: aibuddy
+      pinned: true
+  - id: stop
+    name: AI STOP
+    emoji: ⏹️
+    description: Stop the AI voice now, clear queued audio and cancel the reply
+    for: [key, press, touch]
+    icon: icons/aistop.png
+    command: /home/opti3/.config/ragnaros/bin/aibuddy stop
+  - id: session
+    name: AI session on/off
+    emoji: ⏻
+    description: Arm (keep a Live session ready) or disarm the buddy; it disarms itself when idle
+    for: [key, press, touch]
+    icon: icons/aisession_off.png
+    command: /home/opti3/.config/ragnaros/bin/aibuddy toggle
+  - id: vol_up
+    name: AI volume up
+    emoji: 🔊
+    for: [key, press, touch]
+    icon: icons/aivol_up.png
+    params:
+      - {id: step, label: Step %, type: number, default: 10, min: 1, max: 50}
+    command: /home/opti3/.config/ragnaros/bin/aibuddy vol up {{step|int}}
+  - id: vol_down
+    name: AI volume down
+    emoji: 🔉
+    for: [key, press, touch]
+    icon: icons/aivol_down.png
+    params:
+      - {id: step, label: Step %, type: number, default: 10, min: 1, max: 50}
+    command: /home/opti3/.config/ragnaros/bin/aibuddy vol down {{step|int}}
+  - id: volume_knob
+    name: AI volume
+    emoji: 🎚️
+    for: [knob]
+    params:
+      - {id: step, label: Step %, type: number, default: 5, min: 1, max: 25}
+    knob:
+      cw: /home/opti3/.config/ragnaros/bin/aibuddy vol up {{step|int}}
+      ccw: /home/opti3/.config/ragnaros/bin/aibuddy vol down {{step|int}}
+      press: /home/opti3/.config/ragnaros/bin/aibuddy stop
+  - id: mic
+    name: Mic to PS5 on/off
+    emoji: 🎤
+    description: Toggle the headset mic to the PS5 using the Pi's real mute state
+    for: [key, press, touch]
+    command: /home/opti3/.config/ragnaros/bin/aibuddy mic

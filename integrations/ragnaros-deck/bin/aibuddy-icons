@@ -1,0 +1,103 @@
+#!/usr/bin/env python3
+"""Draw the AI BUDDY key icons (112x112) into ~/.config/ragnaros/assets/icons/."""
+import math
+import os
+
+from PIL import Image, ImageDraw, ImageFont
+
+OUT = os.path.expanduser("~/.config/ragnaros/assets/icons")
+S = 112
+BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+
+
+def font(n):
+    return ImageFont.truetype(BOLD, n)
+
+
+def tile(name, top, bottom, color, glyph, ring=True, fill_bg=(14, 15, 20)):
+    img = Image.new("RGB", (S, S), fill_bg)
+    d = ImageDraw.Draw(img)
+    if ring:
+        d.rounded_rectangle((3, 3, S - 4, S - 4), radius=18, outline=color, width=5)
+    glyph(d, color)
+    for text, y, size in ((top, 14, 15), (bottom, 84, 15)):
+        if text:
+            f = font(size)
+            while d.textlength(text, font=f) > S - 16:
+                size -= 1
+                f = font(size)
+            w = d.textlength(text, font=f)
+            d.text(((S - w) / 2, y), text, font=f, fill=(235, 238, 245) if y > 50 else color)
+    img.save(os.path.join(OUT, f"{name}.png"))
+
+
+def mic(d, c):
+    d.rounded_rectangle((46, 32, 66, 64), radius=10, fill=c)
+    d.arc((38, 44, 74, 74), 0, 180, fill=c, width=4)
+    d.line((56, 74, 56, 80), fill=c, width=4)
+
+
+def bars(d, c):
+    for i, h in enumerate((10, 22, 30, 22, 10)):
+        x = 34 + i * 10
+        d.rounded_rectangle((x, 56 - h, x + 6, 56 + h // 2 + 2), radius=3, fill=c)
+
+
+def dots(d, c):
+    for i in range(3):
+        x = 38 + i * 18
+        d.ellipse((x - 6, 50, x + 6, 62), fill=c)
+
+
+def bang(d, c):
+    d.polygon([(56, 30), (82, 76), (30, 76)], outline=c, width=5)
+    d.line((56, 44, 56, 62), fill=c, width=5)
+    d.ellipse((53, 66, 59, 72), fill=c)
+
+
+def bot(d, c):
+    d.rounded_rectangle((34, 36, 78, 72), radius=10, outline=c, width=4)
+    d.ellipse((44, 48, 52, 56), fill=c)
+    d.ellipse((60, 48, 68, 56), fill=c)
+    d.line((56, 28, 56, 36), fill=c, width=3)
+    d.ellipse((52, 24, 60, 32), fill=c)
+
+
+def stop(d, c):
+    d.rounded_rectangle((36, 34, 76, 74), radius=6, fill=c)
+
+
+def power(d, c):
+    d.arc((34, 34, 78, 78), 300, 240, fill=c, width=6)
+    d.line((56, 28, 56, 56), fill=c, width=6)
+
+
+def plus(d, c):
+    d.polygon([(34, 46), (44, 46), (56, 36), (56, 72), (44, 62), (34, 62)], fill=c)
+    d.line((64, 54, 80, 54), fill=c, width=5)
+    d.line((72, 46, 72, 62), fill=c, width=5)
+
+
+def minus(d, c):
+    d.polygon([(34, 46), (44, 46), (56, 36), (56, 72), (44, 62), (34, 62)], fill=c)
+    d.line((64, 54, 80, 54), fill=c, width=5)
+
+
+GREY, CYAN, RED, AMBER, VIOLET, GREEN = ((120, 125, 140), (34, 211, 238), (248, 68, 68),
+                                        (251, 191, 36), (167, 139, 250), (74, 222, 128))
+tile("aibuddy", "AI BUDDY", "HOLD", CYAN, bot)
+tile("aibuddy_off", "AI BUDDY", "HOLD", GREY, bot)
+tile("aibuddy_connecting", "AI BUDDY", "LINKING", AMBER, dots)
+tile("aibuddy_ready", "AI BUDDY", "READY", CYAN, bot)
+tile("aibuddy_listening", "LISTENING", "SPEAK", RED, mic, fill_bg=(48, 10, 12))
+tile("aibuddy_thinking", "AI BUDDY", "THINKING", AMBER, dots)
+tile("aibuddy_speaking", "AI BUDDY", "SPEAKING", GREEN, bars)
+tile("aibuddy_error", "AI BUDDY", "ERROR", RED, bang)
+tile("aibuddy_offline", "AI BUDDY", "NO LINK", RED, bang)
+tile("aistop", "AI STOP", "", RED, stop)
+tile("aisession", "AI SESSION", "OFF", GREY, power)
+tile("aisession_off", "AI SESSION", "OFF", GREY, power)
+tile("aisession_on", "AI SESSION", "ON", GREEN, power)
+tile("aivol_down", "AI VOL", "DOWN", VIOLET, minus)
+tile("aivol_up", "AI VOL", "UP", VIOLET, plus)
+print("icons written to", OUT)

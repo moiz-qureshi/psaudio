@@ -1,0 +1,48 @@
+# psaudio-buddy configuration (~/.config/psaudio-buddy/buddy.toml)
+# Restart after editing:  systemctl --user restart psaudio-buddy
+# Secrets (GEMINI_API_KEY, BUDDY_TOKEN) live in secrets.env next to this file, mode 600.
+
+model = "gemini-3.8-live"        # any Live model your key can use, e.g. gemini-3.1-flash-live-preview
+voice = "Puck"                   # prebuilt voice: Puck, Kore, Charon, Fenrir, Aoede, Leda, Orus, Zephyr, ...
+ai_volume = 70                   # percent of the AI voice before the limiter (0-150); deck VOL keys change it live
+limiter_ceiling = 0.85           # AI peak after the soft limiter, linear (0.85 ≈ -1.4 dBFS)
+
+idle_timeout_s = 900             # an armed session is closed after this long unused
+max_listen_s = 30                # a held/stuck key auto-submits after this long
+hold_threshold_s = 0.35          # held longer than this = hold-to-talk; shorter tap = tap-to-start/tap-to-send
+max_reply_s = 25                 # longest spoken reply played; longer is cut and cancelled
+max_output_tokens = 1200         # hard cap on generation
+preroll_ms = 200                 # audio kept (in memory only) from just before the press
+context_trigger_tokens = 12000   # sliding-window compression keeps history (and cost per turn) bounded
+
+# which nodes to use - check with:  pactl list short sources / sinks
+mic_source   = "alsa_input.usb-Logitech_A50_X-00.mono-fallback"
+headset_sink = "alsa_output.usb-Logitech_A50_X-00.analog-stereo"
+ps5_mic_sink = "alsa_output.platform-fe980000.usb.mono-fallback"
+
+listen = "0.0.0.0"
+port = 8766
+allow = ["127.0.0.1", "::1", "192.168.5.54"]   # control clients (plus bearer token)
+
+[limits]                          # enforced by this service, per local day
+max_turns_per_day = 300
+max_audio_in_s_per_day = 3600
+max_estimated_usd_per_day = 1.00  # an ESTIMATE from provider token counts x the prices below
+
+[price_per_mtok]                  # USD / 1M tokens, paid tier, ai.google.dev/gemini-api/docs/pricing (checked 2026-10-25)
+in_audio = 3.00
+in_text = 0.75
+out_audio = 12.00
+out_text = 4.50
+
+[wake]                            # "Hey Hasaan" - only while the AI SESSION key is on
+enabled = true
+phrases = ["hey hassan", "hey hasan"]   # spelled the way the offline recogniser knows the sound
+mic = true                        # your headset mic
+squad = true                      # PS5 incoming mix (party chat + game audio); friends' questions go to Gemini
+no_speech_timeout_s = 4           # wake word but no question -> cancel
+squad_max_listen_s = 12
+squad_holdoff_s = 1.5             # squad wake ignored while / just after the AI speaks (echo guard)
+end_silence_ms = 600              # your mic: quiet after words that ends a wake-word question (squad uses the recogniser)
+chime = true                      # headset chime; squad also hears it when a friend triggered it
+session_off_after_s = 7200        # AI SESSION switches itself off after this long unused

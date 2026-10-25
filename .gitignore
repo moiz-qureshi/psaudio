@@ -2,3 +2,4 @@ dist/
 backups/
 *.img
 *.img.xz
+__pycache__/

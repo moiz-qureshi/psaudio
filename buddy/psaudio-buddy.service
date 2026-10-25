@@ -1,0 +1,25 @@
+[Unit]
+Description=PS Audio Bridge - Gemini Live voice buddy (push-to-talk)
+StartLimitIntervalSec=120
+StartLimitBurst=10
+After=pipewire.service pipewire-pulse.service network-online.target
+Wants=pipewire-pulse.service
+# deliberately no Requires=: the bridge never depends on the buddy, and a
+# PipeWire restart must not be blocked by it
+
+[Service]
+Type=simple
+Environment=PULSE_RUNTIME_PATH=/run/user/1000/pulse
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=%h/.config/psaudio-buddy/secrets.env
+ExecStart=%h/.local/lib/psaudio-buddy/.venv/bin/python %h/.local/lib/psaudio-buddy/buddy.py
+Restart=always
+RestartSec=3s
+# stay out of PipeWire's way
+Nice=5
+CPUQuota=150%
+MemoryMax=400M
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,31 @@
+#!/bin/bash
+# Store the Gemini API key without it touching argv, shell history or logs.
+#   ssh -t psaudio-admin buddy-key            (prompts, input hidden)
+#   ssh psaudio-admin buddy-key < keyfile     (reads the first line)
+set -euo pipefail
+DIR=$HOME/.config/psaudio-buddy
+ENV=$DIR/secrets.env
+umask 077
+mkdir -p "$DIR"
+touch "$ENV"; chmod 600 "$ENV"
+if [ -t 0 ]; then
+  read -r -s -p "Paste Gemini API key (hidden), then Enter: " KEY; echo
+else
+  read -r KEY
+fi
+KEY=$(printf %s "$KEY" | tr -d '[:space:]')
+[[ "$KEY" =~ ^[A-Za-z0-9._~+/=-]{20,}$ ]] || { echo "That doesn't look like an API key; nothing saved." >&2; exit 1; }
+grep -v '^GEMINI_API_KEY=' "$ENV" > "$ENV.new" || true
+printf 'GEMINI_API_KEY=%s\n' "$KEY" >> "$ENV.new"
+mv "$ENV.new" "$ENV"
+echo "Saved to $ENV (mode 600). Checking the key with Google..."
+code=$(curl -s -o /tmp/.buddy-models.$$ -w '%{http_code}' -H "x-goog-api-key: $KEY" \
+  "https://generativelanguage.googleapis.com/v1beta/models?pageSize=200" || echo 000)
+if [ "$code" = 200 ]; then
+  echo "Key OK. Live-capable models on this key:"
+  python3 -c 'import json,sys;[print("  "+m["name"].split("/")[1]) for m in json.load(open(sys.argv[1]))["models"] if "bidiGenerateContent" in m.get("supportedGenerationMethods",[])]' /tmp/.buddy-models.$$
+else
+  echo "Google answered HTTP $code - the key was saved but may be wrong."
+fi
+rm -f /tmp/.buddy-models.$$
+systemctl --user restart psaudio-buddy 2>/dev/null && echo "psaudio-buddy restarted." || true

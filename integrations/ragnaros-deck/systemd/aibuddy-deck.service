@@ -1,0 +1,11 @@
+[Unit]
+Description=Show psaudio-buddy (AI BUDDY) state on the Ragnaros deck
+After=ragnarosd.service
+
+[Service]
+ExecStart=%h/.config/ragnaros/bin/aibuddy-deck
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target

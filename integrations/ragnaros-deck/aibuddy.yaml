@@ -10,6 +10,7 @@ match:
   - 'bin/aibuddy'
 recognize:
   - {pattern: 'bin/aibuddy press$', action: talk}
+  - {pattern: 'bin/aibuddy press roast$', action: roast}
   - {pattern: 'bin/aibuddy stop$', action: stop}
   - {pattern: 'bin/aibuddy toggle$', action: session}
   - {pattern: 'bin/aibuddy vol up', action: vol_up}
@@ -29,6 +30,17 @@ actions:
       action: /home/opti3/.config/ragnaros/bin/aibuddy press
       release: /home/opti3/.config/ragnaros/bin/aibuddy release
       state: aibuddy
+      pinned: true
+  - id: roast
+    name: ROAST a player (hold to talk)
+    emoji: 🔥
+    description: Hold, say a random player's username (and K/D, kills...), release - Hasaan roasts them. No lookups.
+    for: [key]
+    icon: icons/airoast.png
+    spec:
+      action: /home/opti3/.config/ragnaros/bin/aibuddy press roast
+      release: /home/opti3/.config/ragnaros/bin/aibuddy release
+      state: airoast
       pinned: true
   - id: stop
     name: AI STOP

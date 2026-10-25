@@ -301,6 +301,7 @@ class LocalSession:
     def __init__(self, cfg, profile, history, on_stage, mcp=None, tools=None, on_tool=None):
         self.cfg, self.p = cfg, profile
         self.on_tool = on_tool            # buddy plays a pre-rendered "let me look that up"
+        self.turn_mode = {}               # set by the buddy at the end of each question (ROAST key)
         self.mcp = mcp                    # crcmz MCP client (read-only tools), or None
         self.tools = tools or []
         self.history = history            # deque of (user, assistant), bounded by the buddy
@@ -461,14 +462,21 @@ class LocalSession:
             return                               # silence or Whisper's usual silence hallucinations
         await self.out.put(_msg(input_transcription=NS(text=text)))
 
-        msgs = self._messages(text)
+        roast = self.turn_mode.get("mode") == "roast"
+        if roast:
+            # ROAST key: one savage roast of a random player, no lookups, no history
+            msgs = [{"role": "system", "content": self.cfg["system_instruction"].split(" You can look things up")[0]
+                     + " " + self.turn_mode.get("directive", "")},
+                    {"role": "user", "content": text}]
+        else:
+            msgs = self._messages(text)
 
         sentences = asyncio.Queue()
         speaker = asyncio.create_task(self._speak(sentences))
         reply = ""
         try:
-            for _round in range(3):                    # at most two rounds of crcmz lookups
-                text_out, calls = await self._stream_llm(msgs, sentences, first_reply=not reply)
+            for _round in range(1 if roast else 3):     # at most two rounds of crcmz lookups
+                text_out, calls = await self._stream_llm(msgs, sentences, first_reply=not reply, roast=roast)
                 reply = (reply + " " + text_out).strip() if text_out else reply
                 if not calls or not self.mcp:
                     break
@@ -492,13 +500,13 @@ class LocalSession:
         if reply:
             self.history.append((text, reply))
 
-    async def _stream_llm(self, msgs, sentences, first_reply):
+    async def _stream_llm(self, msgs, sentences, first_reply, roast=False):
         """One streamed completion: speak text as it comes; return (text, tool calls)."""
         body = {"model": self.p["llm"], "messages": msgs, "stream": True,
-                "max_tokens": int(self.p.get("max_tokens", 220)),
-                "temperature": float(self.p.get("temperature", 0.8)),
+                "max_tokens": max(320, int(self.p.get("max_tokens", 220))) if roast else int(self.p.get("max_tokens", 220)),
+                "temperature": max(1.0, float(self.p.get("temperature", 0.8))) if roast else float(self.p.get("temperature", 0.8)),
                 "chat_template_kwargs": {"enable_thinking": False}}
-        if self.tools and self.mcp:
+        if self.tools and self.mcp and not roast:
             body["tools"] = openai_tools(self.tools)
         reply, pending, in_think, calls = "", "", False, {}
         async with self.client.stream("POST", self.base + "/chat/completions", json=body) as resp:

@@ -46,9 +46,12 @@ def main():
             st = json.load(urllib.request.urlopen(req, timeout=35))
             seq = st["seq"]
             state = st["state"]
-            if state != last:
+            roast_turn = st.get("turn_mode") == "roast"
+            if (state, roast_turn) != last:
                 ctl("keystate", "aibuddy", state)
-                last = state
+                # the ROAST key lights up only while a roast is being taken / spoken
+                ctl("keystate", "airoast", state if roast_turn and state in ("listening", "thinking", "speaking") else "idle")
+                last = (state, roast_turn)
             session = "on" if st.get("session_on") else "off"
             if session != last_session:
                 ctl("keystate", "aisession", session)
@@ -59,7 +62,7 @@ def main():
             if wake and wake != last_wake and last_wake is not None and wake.get("source") == "squad":
                 toast("HASAAN", "listening to the squad")
             last_wake = wake or {}
-            if state == "error" and st.get("error") != last_err:
+            if state == "error" and st.get("error") != last_err:  # noqa
                 toast("AI BUDDY", st.get("error") or "error")
             last_err = st.get("error") if state == "error" else None
             if last_vol is not None and st["ai_volume"] != last_vol:

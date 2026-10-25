@@ -31,6 +31,7 @@ import subprocess
 import sys
 import time
 import queue as queue_mod
+import random
 import re
 import threading
 import tomllib
@@ -119,6 +120,27 @@ PERSONALITY = (
     "to see the game, hear the squad, or know live match events unless someone tells you. "
     "Questions may start with 'Hey Hasaan', and several squad members may talk to you. You're "
     "an AI teammate, not a real person, and you own it.")
+
+# ROAST key: the next question names a random online player (plus any stats).
+ROAST_LINES = [
+    "Ima slap my dick across your face",
+    "Shut yo bitch ass up before I put my dick in your nostril",
+    "Shut the fuck up before I put my dick in your ear hole",
+]
+
+
+def roast_directive(line=None):
+    d = ("ROAST MODE for this message. I'm about to say a random online player's username, "
+         "maybe with stats like their K/D, kills, deaths or rank. Go off on that player: a savage, "
+         "hilarious roast of 2 to 4 sentences aimed straight at them. Tear apart the username: "
+         "wordplay, what it sounds like, what kind of person picks a name like that. If I give "
+         "stats, use them and exaggerate how bad they are; if I don't, never invent numbers, "
+         "roast the name and whatever I said they did. Don't look anything up, don't ask "
+         "questions, no intro, no disclaimers: just roast.")
+    if line:
+        d += f' Work this line in naturally somewhere, word for word: "{line}".'
+    return d
+
 
 IN_RATE, OUT_RATE = 16000, 24000          # Gemini Live: 16 kHz in, 24 kHz out, s16le mono
 IN_CHUNK = IN_RATE * 2 * 40 // 1000       # 40 ms of mic per message
@@ -608,6 +630,7 @@ class Buddy:
             "armed": self.session_on or self.armed, "session_on": self.session_on,
             "connected": self.session_ready.is_set(),
             "listening_source": self.listen_source if self.listening else None,
+            "turn_mode": (self.turn or {}).get("mode", ""),
             "crcmz": {"enabled": self.mcp_conf()["enabled"], "token_set": bool(self.cfg["crcmz_token"]),
                       "tools_in_session": len(self.live_tools), "error": self.mcp_error},
             "wake": {"enabled": bool(self.cfg["wake"]["enabled"]),
@@ -724,6 +747,12 @@ class Buddy:
         c = self.profiles.data.setdefault("ack", {})
         c.setdefault("enabled", True)
         c.setdefault("text", "Hmm?")
+        return c
+
+    def roast_conf(self):
+        c = self.profiles.data.setdefault("roast", {})
+        c.setdefault("lines", list(ROAST_LINES))
+        c.setdefault("line_chance", 0.7)
         return c
 
     def filler_conf(self):
@@ -1024,7 +1053,13 @@ class Buddy:
         low = text.lower()
         if "api key" in low or "api_key_invalid" in low or code in (401, 403) or "1008" in low and "key" in low:
             return "invalid or unauthorised API key", True
-        if "not found" in low or "not supported" in low and "model" in low or code == 404:
+        if self.resume_handle and ("not found" in low or "resum" in low or "invalid" in low and "handle" in low):
+            self.resume_handle = None            # the old session is gone: start a fresh one
+            return "Gemini session expired; reconnecting", False
+        if "1011" in low or "internal error" in low or "unavailable" in low and "model" not in low:
+            self.resume_handle = None
+            return "Gemini hiccup (internal error); reconnecting", False
+        if ("not found" in low or "not supported" in low) and "model" in low or code == 404:
             return f"model {self.model_name()} unavailable", True
         if code == 429 or "quota" in low or "resource_exhausted" in low or "rate" in low and "limit" in low:
             return "rate limited / quota exhausted", False
@@ -1041,7 +1076,12 @@ class Buddy:
                 elif kind == "audio":
                     await session.send_realtime_input(
                         audio=types.Blob(data=payload, mime_type=f"audio/pcm;rate={IN_RATE}"))
+                elif kind == "text":
+                    await session.send_client_content(
+                        turns=types.Content(role="user", parts=[types.Part(text=payload)]), turn_complete=False)
                 elif kind == "end":
+                    if hasattr(session, "turn_mode"):
+                        session.turn_mode = payload or {}
                     await session.send_realtime_input(activity_end=types.ActivityEnd())
                     if self.turn is not None:
                         self.turn["end_sent_ms"] = now_ms()
@@ -1187,7 +1227,7 @@ class Buddy:
         for c in held:
             self._queue(("audio", c))
 
-    async def start_listen(self, client_ms=None, source="mic", wake=False):
+    async def start_listen(self, client_ms=None, source="mic", wake=False, mode=""):
         self.last_use = time.monotonic()
         if self.listening:
             return
@@ -1209,6 +1249,15 @@ class Buddy:
         self.turn = {"press_ms": client_ms or now_ms(), "press_rx_ms": now_ms(),
                      "model": self.model_name(), "profile": self.profile["id"],
                      "connected_at_press": self.session_ready.is_set()}
+        self.listen_mode = mode
+        if mode == "roast":
+            self.turn["mode"] = "roast"
+            c = self.roast_conf()
+            lines = [l for l in c["lines"] if l.strip()]
+            line = random.choice(lines) if lines and random.random() < c["line_chance"] else None
+            self.turn["roast_line"] = line
+            if self.profile["kind"] == "gemini":       # Gemini: tell it before the audio
+                self._queue(("text", roast_directive(line)))
         self.listening, self.listen_bytes = True, 0
         self.listen_source = source
         self.listen_started = time.monotonic()
@@ -1255,7 +1304,9 @@ class Buddy:
             self.turn["release_rx_ms"] = now_ms()
             self.turn["listen_s"] = round(self.listen_bytes / (IN_RATE * 2), 2)
         if submit and self.listen_bytes:
-            self._queue(("end", None))
+            mode = getattr(self, "listen_mode", "")
+            self._queue(("end", {"mode": mode, "directive": roast_directive((self.turn or {}).get("roast_line"))
+                                 if mode == "roast" else ""}))
             self.activity_open = False
             self.gen_active = True
             self.usage.add_turn(self.listen_bytes / (IN_RATE * 2),
@@ -1279,12 +1330,12 @@ class Buddy:
             if self.state == "thinking":
                 await self.set_state("error", self.error or "could not connect")
 
-    async def press(self, client_ms=None):
+    async def press(self, client_ms=None, mode=""):
         self.press_t = time.monotonic()
         if self.listening:
             await self.end_listen(client_ms)     # second tap submits
         else:
-            await self.start_listen(client_ms)
+            await self.start_listen(client_ms, mode=mode)
 
     async def release(self, client_ms=None):
         if self.listening and time.monotonic() - self.press_t >= self.cfg["hold_threshold_s"] \
@@ -1395,12 +1446,12 @@ class Buddy:
         except Exception:
             return False
 
-    async def feed_file(self, path):
+    async def feed_file(self, path, mode=""):
         """Test hook: stream a 16 kHz mono s16le file at real time as if spoken."""
         data = pathlib.Path(path).read_bytes()
         if data[:4] == b"RIFF":
             data = data[44:]
-        await self.start_listen(source="file")
+        await self.start_listen(source="file", mode=mode)
         if not self.listening:
             return None
         self.turn["test"] = True
@@ -1467,7 +1518,8 @@ def make_app(b: Buddy):
         return web.json_response({"ok": True, **b.status()})
 
     async def press(r):
-        await b.press(client_ms(r)); return await ok()
+        mode = r.query.get("mode", "")
+        await b.press(client_ms(r), mode="roast" if mode == "roast" else ""); return await ok()
 
     async def release(r):
         await b.release(client_ms(r)); return await ok()
@@ -1522,7 +1574,7 @@ def make_app(b: Buddy):
         p = pathlib.Path(body["file"]).resolve()
         if not str(p).startswith(str(STATE_DIR / "test")):
             return web.json_response({"ok": False, "error": "test files live in state/test"}, status=400)
-        secs = await b.feed_file(p)
+        secs = await b.feed_file(p, mode="roast" if body.get("mode") == "roast" else "")
         return web.json_response({"ok": True, "fed_s": secs, **b.status()})
 
     async def profiles_get(r):
@@ -1716,6 +1768,21 @@ def make_app(b: Buddy):
                 pass
         return await ack_get(r)
 
+    async def roast_get(r):
+        c = b.roast_conf()
+        return web.json_response({"ok": True, "lines": c["lines"], "line_chance": c["line_chance"],
+                                  "defaults": ROAST_LINES})
+
+    async def roast_put(r):
+        body = await r.json()
+        c = b.roast_conf()
+        if isinstance(body.get("lines"), list):
+            c["lines"] = [str(l).strip()[:200] for l in body["lines"] if str(l).strip()][:30]
+        if "line_chance" in body:
+            c["line_chance"] = max(0.0, min(1.0, float(body["line_chance"])))
+        b.profiles.save()
+        return await roast_get(r)
+
     async def fillers_get(r):
         c = b.filler_conf()
         ready = all(b.clip_path(l).exists() for l in c["lines"] if l.strip())
@@ -1810,6 +1877,7 @@ def make_app(b: Buddy):
         web.get("/mcp", mcp_get), web.put("/mcp", mcp_put),
         web.get("/ack", ack_get), web.put("/ack", ack_put),
         web.get("/fillers", fillers_get), web.put("/fillers", fillers_put),
+        web.get("/roast", roast_get), web.put("/roast", roast_put),
         web.post("/voices/{name:[a-z0-9][a-z0-9_-]{0,31}}/record", voice_record),
         web.put("/voices/{name:[a-z0-9][a-z0-9_-]{0,31}}", voice_put),
         web.delete("/voices/{name:[a-z0-9][a-z0-9_-]{0,31}}", voice_delete),

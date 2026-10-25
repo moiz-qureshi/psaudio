@@ -110,4 +110,17 @@ def brain(d, c):
 
 
 tile("aimodel", "AI MODEL", "NEXT", AMBER, brain)
+
+
+def flame(d, c):
+    d.polygon([(56, 26), (70, 46), (74, 60), (68, 74), (56, 80), (44, 74), (38, 60), (44, 48), (50, 54)], fill=c)
+    d.polygon([(56, 50), (63, 62), (60, 72), (56, 75), (52, 72), (49, 63)], fill=(255, 220, 120))
+
+
+ORANGE = (255, 120, 40)
+tile("airoast", "ROAST", "HOLD", ORANGE, flame)
+tile("airoast_idle", "ROAST", "HOLD", ORANGE, flame)
+tile("airoast_listening", "ROAST", "SAY NAME", RED, mic, fill_bg=(48, 10, 12))
+tile("airoast_thinking", "ROAST", "COOKING", AMBER, flame)
+tile("airoast_speaking", "ROAST", "COOKING", GREEN, bars)
 print("icons written to", OUT)

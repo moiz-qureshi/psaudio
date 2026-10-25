@@ -1,6 +1,6 @@
 #!/bin/bash
 # aibuddy - drive psaudio-buddy (Gemini voice on the PS5 audio Pi) from the deck.
-#   aibuddy press | release | stop | toggle | arm | disarm | vol up|down [N] | status
+#   aibuddy press [roast] | release | stop | toggle | arm | disarm | vol up|down [N] | status
 #   aibuddy mic        toggle the headset mic to the PS5 (reads the real mute state from the Pi)
 #   aibuddy model next | <profile-id>    switch the AI model profile (managed on Deck Manager's AI page)
 # Token: ~/.config/ragnaros/secrets/aibuddy.env (BUDDY_URL, BUDDY_TOKEN), mode 600.
@@ -9,7 +9,8 @@ set -u
 t=$(date +%s%3N)   # client timestamp, for the latency log
 call() { curl -s -m "${2:-3}" -X POST -H "Authorization: Bearer $BUDDY_TOKEN" "$BUDDY_URL$1"; }
 case "${1:-status}" in
-  press|release|stop|toggle|arm|disarm) call "/$1?t=$t" 15 ;;
+  press) if [ "${2:-}" = roast ]; then call "/press?mode=roast&t=$t" 15; else call "/press?t=$t" 15; fi ;;
+  release|stop|toggle|arm|disarm) call "/$1?t=$t" 15 ;;
   vol) case "${2:-}" in
          up) call "/volume?up=${3:-10}" ;;
          down) call "/volume?down=${3:-10}" ;;

@@ -35,10 +35,29 @@ def toast(title, body):
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
+LIVE = os.path.expanduser("~/.local/state/ragnaros-plus/aibuddy.json")
+
+
+def snapshot(st):
+    """What the deck's live strip shows (ragnarosd-plus reads this file)."""
+    data = {"ts": time.time(), "state": st.get("state"), "error": st.get("error"),
+            "profile": (st.get("profile") or {}).get("label"), "session_on": st.get("session_on"),
+            "mic_muted": st.get("mic_muted"), "question": (st.get("question") or "")[-200:],
+            "reply": (st.get("reply") or "")[-400:], "ai_volume": st.get("ai_volume"),
+            "listening_source": st.get("listening_source")}
+    tmp = LIVE + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            json.dump(data, f)
+        os.replace(tmp, LIVE)
+    except OSError:
+        pass
+
+
 def main():
     e = env()
     url, token = e["BUDDY_URL"], e["BUDDY_TOKEN"]
-    seq, last, last_err, last_vol, last_wake, last_session, last_prof = -1, None, None, None, None, None, None
+    seq, last, last_err, last_session, last_crcmz = -1, None, None, None, None
     while True:
         try:
             req = urllib.request.Request(f"{url}/status?since={seq}&wait=25",
@@ -46,6 +65,7 @@ def main():
             st = json.load(urllib.request.urlopen(req, timeout=35))
             seq = st["seq"]
             state = st["state"]
+            snapshot(st)
             roast_turn = st.get("turn_mode") == "roast"
             if (state, roast_turn) != last:
                 ctl("keystate", "aibuddy", state)
@@ -54,25 +74,19 @@ def main():
                 last = (state, roast_turn)
             session = "on" if st.get("session_on") else "off"
             if session != last_session:
-                ctl("keystate", "aisession", session)
-                if last_session is not None:
-                    toast("AI SESSION", "say \"Hey Hasaan\"" if session == "on" else "off")
+                ctl("keystate", "aisession", session)    # state shows on the key + live strip, no toast
                 last_session = session
-            wake = (st.get("wake") or {}).get("last")
-            if wake and wake != last_wake and last_wake is not None and wake.get("source") == "squad":
-                toast("HASAAN", "listening to the squad")
-            last_wake = wake or {}
-            if state == "error" and st.get("error") != last_err:  # noqa
-                toast("AI BUDDY", st.get("error") or "error")
+            # toasts only for problems worth interrupting the strip for; everything
+            # else (state, model, session, volume, who asked) is on the live strip
+            if state == "error" and st.get("error") != last_err:
+                toast("HASAAN", st.get("error") or "error")
             last_err = st.get("error") if state == "error" else None
-            if last_vol is not None and st["ai_volume"] != last_vol:
-                toast("AI VOLUME", f"{st['ai_volume']}%")
-            last_vol = st["ai_volume"]
-            prof = (st.get("profile") or {}).get("label")
-            if last_prof is not None and prof != last_prof:
-                toast("AI MODEL", prof or "?")
-            last_prof = prof
+            crcmz_err = (st.get("crcmz") or {}).get("error")
+            if crcmz_err and crcmz_err != last_crcmz:
+                toast("CRCMZ", "lookups unavailable: " + crcmz_err[:60])
+            last_crcmz = crcmz_err
         except Exception:
+            snapshot({"state": "offline"})
             if last != "offline":
                 ctl("keystate", "aibuddy", "offline")
                 last = "offline"

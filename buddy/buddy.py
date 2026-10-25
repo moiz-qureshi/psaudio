@@ -895,6 +895,8 @@ class Buddy:
         """What the model is told about its tools, including that it can't send
         anything when no write tool is on (it once claimed to have sent a message)."""
         hint = mcp_client.TOOL_HINT if self.live_tools else ""
+        if hint and not self.filler_conf()["enabled"]:
+            hint = hint.replace(mcp_client.FILLER_SENTENCE, mcp_client.NO_FILLER_SENTENCE)
         if not any(mcp_client.is_write(t["name"]) for t in self.live_tools):
             hint += mcp_client.NO_WRITE_HINT
         return hint

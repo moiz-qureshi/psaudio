@@ -168,6 +168,10 @@ NO_WRITE_HINT = (" You cannot send messages (WhatsApp, PSN, Mattermost), ring an
                  "change anything in any app; you have no tool for it. If someone asks you to, say "
                  "straight up that you can't do that from here. Never claim you sent or did something.")
 
+FILLER_SENTENCE = ("A short 'let me look that up' line is played for you automatically when you "
+                   "use a tool, so don't announce lookups yourself; just give the answer. ")
+NO_FILLER_SENTENCE = "Never say you're looking something up or checking; just give the answer. "
+
 TOOL_HINT = (" You can look things up in the squad's CRCMZ app (members, profiles, stats, "
              "leaderboards, PSN/Steam status, WhatsApp history, clips, tournaments, memories, and "
              "the Calgary trip: itinerary, stay, flights, who owes whom, packing, polls, food) "
@@ -175,8 +179,7 @@ TOOL_HINT = (" You can look things up in the squad's CRCMZ app (members, profile
              "history, and use what you find to roast them properly. Call squad_roster first "
              "if you need to work out who a name refers to. Never read out phone numbers, "
              "addresses or private messages word for word; summarise and roast instead. "
-             "A short 'let me look that up' line is played for you automatically when you "
-             "use a tool, so don't announce lookups yourself; just give the answer. "
+             + FILLER_SENTENCE +
              "Never make up stats, numbers, dates or results: only say what a tool returned. "
              "If a lookup comes back empty, say the app doesn't have that and roast them anyway "
              "without inventing numbers. "

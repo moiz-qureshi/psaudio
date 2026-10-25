@@ -53,6 +53,28 @@ One personality for every model, edited on the AI page (**Personality** box;
 saving does for you. No slurs or attacks on identity, by design: it roasts aim
 and decisions.
 
+## crcmz knowledge (MCP, read-only)
+
+AI page → **🔌 crcmz knowledge**: paste your personal token from
+app.crcmz.me → Settings → MCP and switch it on. Hasaan can then look up squad
+members, profiles, stats, leaderboards, PSN/Steam status, WhatsApp history,
+clips, tournaments and memories through `https://app.crcmz.me/mcp`, with
+Gemini function calls or local tool calls (a short filler line covers the
+lookup). **Read-only by design**: crcmz's 20 write tools (sending to
+WhatsApp/PSN/Mattermost, ring, tasks, records...) are blocked by name and by
+pattern and never offered, because anyone in party chat can say "Hey Hasaan".
+The tool list is editable; fewer tools = cheaper Gemini turns (Live re-bills
+its setup every turn). Results are capped at 4000 characters. The token lives
+in the Pi's `secrets.env` (`CRCMZ_MCP_TOKEN`), never in the browser.
+
+## Wake reply
+
+Instead of a beep, Hasaan answers the wake word with a short "Ahmm?" in the
+active voice (Gemini TTS for Gemini voices, oMLX for Kokoro / your cloned
+voice, HasaanVoice for Personal Voice), rendered once per voice and cached in
+`~/.local/state/psaudio-buddy/acks/`. The word is editable on the AI page; the
+beep remains the fallback when the voice can't be rendered (e.g. Mac asleep).
+
 ## Model profiles (Deck Manager → AI)
 
 Stored on the Pi in `~/.config/psaudio-buddy/profiles.json`, edited from the AI

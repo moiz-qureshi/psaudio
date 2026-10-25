@@ -23,6 +23,7 @@ if [ ! -d "$APP/models/$M" ]; then
 fi
 install -m 755 buddy.py "$APP/buddy.py"
 install -m 644 local_backend.py "$APP/local_backend.py"
+install -m 644 mcp_client.py "$APP/mcp_client.py"
 install -m 644 requirements.lock "$APP/requirements.lock"
 install -m 755 buddy-key "$HOME/.local/bin/buddy-key"
 install -m 644 psaudio-buddy.service "$UNIT"

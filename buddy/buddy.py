@@ -31,6 +31,7 @@ import subprocess
 import sys
 import time
 import queue as queue_mod
+import re
 import threading
 import tomllib
 
@@ -48,6 +49,7 @@ log = logging.getLogger("buddy")
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import local_backend  # noqa: E402
+import mcp_client  # noqa: E402
 
 CONFIG_PATH = pathlib.Path(os.environ.get(
     "BUDDY_CONFIG", "~/.config/psaudio-buddy/buddy.toml")).expanduser()
@@ -64,6 +66,7 @@ DEFAULTS = {
     "hold_threshold_s": 0.35,    # released sooner than this = tap (toggle mode)
     "max_reply_s": 25,           # playback is cut (and the turn cancelled) past this
     "max_output_tokens": 1200,
+    "ack_tts_model": "gemini-3.8-flash-tts",   # renders the wake reply in a Gemini voice
     "preroll_ms": 300,           # audio kept (memory only) from just before the press / wake word
     "context_trigger_tokens": 6000,   # sliding-window compression bounds history
     "system_instruction": (
@@ -137,6 +140,7 @@ def load_config():
     cfg["token"] = os.environ.get("BUDDY_TOKEN", "").strip()
     cfg["omlx_key"] = os.environ.get("OMLX_API_KEY", "").strip()
     cfg["mac_voice_token"] = os.environ.get("MAC_VOICE_TOKEN", "").strip()
+    cfg["crcmz_token"] = os.environ.get("CRCMZ_MCP_TOKEN", "").strip()
     return cfg
 
 
@@ -539,6 +543,11 @@ class Buddy:
         self.usage = Usage(STATE_DIR / "usage.json", cfg["price_per_mtok"])
         self.profiles = local_backend.Profiles(CONFIG_PATH.parent / "profiles.json", cfg)
         self.local_history = collections.deque(maxlen=12)   # bounded local conversation
+        self.mcp = None
+        self.mcp_error = None
+        self.live_tools = []          # crcmz tools offered to the current session
+        self.tool_tasks = set()
+        self.ack_task = None
         self.player = Player(cfg)
         self.player.on_first = self._first_played
         self.player.on_drained = self._drained
@@ -599,6 +608,8 @@ class Buddy:
             "armed": self.session_on or self.armed, "session_on": self.session_on,
             "connected": self.session_ready.is_set(),
             "listening_source": self.listen_source if self.listening else None,
+            "crcmz": {"enabled": self.mcp_conf()["enabled"], "token_set": bool(self.cfg["crcmz_token"]),
+                      "tools_in_session": len(self.live_tools), "error": self.mcp_error},
             "wake": {"enabled": bool(self.cfg["wake"]["enabled"]),
                      "active": {k: (not d.paused) for k, d in self.detectors.items()},
                      "last": self.last_wake},
@@ -636,6 +647,7 @@ class Buddy:
         """Switch model profile; an open connection is replaced, the wake word keeps going."""
         self.profiles.use(pid)
         self.resume_handle = None
+        self.prepare_ack()
         log.info("profile -> %s (%s)", pid, self.model_name())
         if self.listening:
             await self._end_listen(submit=False)
@@ -658,12 +670,131 @@ class Buddy:
         if self.turn is not None and name not in self.turn:
             self.turn[name] = now_ms()
 
+    # -- crcmz MCP -----------------------------------------------------------------
+    def mcp_conf(self):
+        c = self.profiles.data.setdefault("mcp", {})
+        c.setdefault("enabled", False)
+        c.setdefault("url", "https://app.crcmz.me/mcp")
+        c.setdefault("tools", list(mcp_client.DEFAULT_TOOLS))
+        return c
+
+    async def mcp_tools(self):
+        """The crcmz read tools to offer this session ([] when off or unreachable)."""
+        c = self.mcp_conf()
+        if not c["enabled"] or not self.cfg["crcmz_token"]:
+            return []
+        try:
+            if self.mcp is None or self.mcp.url != c["url"] or self.mcp.token != self.cfg["crcmz_token"]:
+                if self.mcp:
+                    await self.mcp.close()
+                self.mcp = mcp_client.CrcmzMCP(c["url"], self.cfg["crcmz_token"])
+            tools = mcp_client.selected(await asyncio.wait_for(self.mcp.tools(), 10), c["tools"])
+            self.mcp_error = None
+            return tools
+        except Exception as e:
+            self.mcp_error = f"{type(e).__name__}: {str(e)[:120]}"
+            log.warning("crcmz MCP unavailable (continuing without it): %s", self.mcp_error)
+            return []
+
+    async def _run_tools(self, calls):
+        """Gemini asked for crcmz data: fetch it (in parallel) and answer the calls."""
+        session = self.session
+        if self.turn is not None:
+            self.turn.setdefault("tools", []).extend(fc.name for fc in calls)
+
+        async def one(fc):
+            text = await self.mcp.call(fc.name, dict(fc.args or {})) if self.mcp else "error: crcmz not connected"
+            return types.FunctionResponse(id=fc.id, name=fc.name, response={"result": text})
+        try:
+            responses = await asyncio.gather(*(one(fc) for fc in calls))
+            if session is not None and session is self.session:
+                await session.send_tool_response(function_responses=list(responses))
+        except Exception as e:
+            log.warning("tool response failed: %s", e)
+
+    # -- "Ahmm?" when the wake word is heard (instead of a beep) ---------------------
+    def ack_conf(self):
+        c = self.profiles.data.setdefault("ack", {})
+        c.setdefault("enabled", True)
+        c.setdefault("text", "Ahmm?")
+        return c
+
+    def ack_path(self):
+        import hashlib
+        p, c = self.profile, self.ack_conf()
+        key = json.dumps([c["text"], p["kind"], p.get("voice"), p.get("tts_provider"), p.get("tts_model"),
+                          p.get("tts_voice"), p.get("ref_voice")], sort_keys=True)
+        return STATE_DIR / "acks" / (hashlib.sha1(key.encode()).hexdigest()[:16] + ".wav")
+
+    def prepare_ack(self):
+        """Render the wake reply in the active voice, once, in the background."""
+        if not self.ack_conf()["enabled"] or self.ack_path().exists():
+            return
+        if self.ack_task and not self.ack_task.done():
+            return
+        self.ack_task = asyncio.create_task(self._render_ack())
+
+    async def _render_ack(self):
+        import base64
+        import httpx
+        p, text, out = self.profile, self.ack_conf()["text"], self.ack_path()
+        try:
+            async with httpx.AsyncClient(timeout=30) as c:
+                if p["kind"] == "gemini":
+                    r = await c.post(
+                        f"https://generativelanguage.googleapis.com/v1beta/models/{self.cfg['ack_tts_model']}:generateContent",
+                        headers={"x-goog-api-key": self.cfg["api_key"]},
+                        json={"contents": [{"parts": [{"text": text}]}], "generationConfig": {
+                            "responseModalities": ["AUDIO"], "speechConfig": {"voiceConfig": {
+                                "prebuiltVoiceConfig": {"voiceName": p["voice"]}}}}})
+                    r.raise_for_status()
+                    part = r.json()["candidates"][0]["content"]["parts"][0]["inlineData"]
+                    raw, fmt = base64.b64decode(part["data"]), part.get("mimeType", "")
+                    if "wav" not in fmt:          # raw PCM: s16le 24 kHz mono
+                        raw = local_backend.pcm_to_wav(raw, 24000)
+                elif p["tts_provider"] == "macos":
+                    r = await c.post(p["mac_voice_url"].rstrip("/") + "/speak", json={"text": text},
+                                     headers={"Authorization": f"Bearer {self.cfg['mac_voice_token']}"})
+                    r.raise_for_status()
+                    raw = r.content
+                else:
+                    body = {"model": p["tts_model"], "input": text, "voice": p.get("tts_voice"),
+                            "response_format": "wav"}
+                    ref = local_backend.voice_ref(p.get("ref_voice", "")) if "kokoro" not in p["tts_model"].lower() else None
+                    if ref:
+                        body["ref_audio"], body["ref_text"] = ref
+                        body.pop("voice")
+                    elif "kokoro" not in p["tts_model"].lower():
+                        body.update(model=local_backend.LOCAL_DEFAULTS["tts_model"],
+                                    voice=local_backend.LOCAL_DEFAULTS["tts_voice"])
+                    r = await c.post(p["base_url"].rstrip("/") + "/audio/speech", json=body,
+                                     headers={"Authorization": f"Bearer {self.cfg['omlx_key']}"})
+                    r.raise_for_status()
+                    raw = r.content
+            trim = "silenceremove=start_periods=1:start_threshold=-42dB"
+            out.parent.mkdir(parents=True, exist_ok=True)
+            proc = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", "pipe:0", "-ac", "1",
+                "-af", f"{trim},areverse,{trim},areverse,loudnorm=I=-18:TP=-2", "-ar", "24000",
+                "-t", "2", str(out), stdin=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            _, err = await asyncio.wait_for(proc.communicate(raw), 30)
+            if proc.returncode != 0:
+                raise RuntimeError(err.decode(errors="ignore")[-120:])
+            log.info("wake reply %r ready for %s", text, p["id"])
+        except Exception as e:
+            log.warning("wake reply not rendered (beep instead): %s", str(e)[:160])
+
     def personality(self):
         return (self.profiles.data.get("personality") or "").strip() or PERSONALITY
 
     def live_config(self):
-        c = dict(self.cfg, voice=self.profile["voice"], system_instruction=self.personality())
+        hint = mcp_client.TOOL_HINT if self.live_tools else ""
+        c = dict(self.cfg, voice=self.profile["voice"], system_instruction=self.personality() + hint)
+        extra = {}
+        if self.live_tools:
+            extra["tools"] = [types.Tool(function_declarations=mcp_client.gemini_declarations(self.live_tools))]
         return types.LiveConnectConfig(
+            **extra,
             response_modalities=["AUDIO"],
             system_instruction=c["system_instruction"],
             max_output_tokens=int(c["max_output_tokens"]),
@@ -765,8 +896,10 @@ class Buddy:
     def _connect(self, client):
         p = self.profile
         if p["kind"] == "local":
-            return local_backend.LocalSession(dict(self.cfg, system_instruction=self.personality()),
-                                              p, self.local_history, self._stage)
+            hint = mcp_client.TOOL_HINT if self.live_tools else ""
+            return local_backend.LocalSession(dict(self.cfg, system_instruction=self.personality() + hint),
+                                              p, self.local_history, self._stage,
+                                              mcp=self.mcp if self.live_tools else None, tools=self.live_tools)
         return client.aio.live.connect(model=p["model"], config=self.live_config())
 
     async def _session_loop(self):
@@ -776,6 +909,7 @@ class Buddy:
             if self.state not in ("listening",):
                 await self.set_state("connecting")
             try:
+                self.live_tools = await self.mcp_tools()
                 t = time.monotonic()
                 async with self._connect(client) as session:
                     self.session = session
@@ -783,10 +917,11 @@ class Buddy:
                     if self.activity_open and not self.listening:
                         self.activity_open = False
                     self.session_ready.set()
-                    log.info("connected to %s (%s) in %.0f ms", self.model_name(),
-                             self.profile["id"], (time.monotonic() - t) * 1000)
+                    log.info("connected to %s (%s) in %.0f ms, %d crcmz tools", self.model_name(),
+                             self.profile["id"], (time.monotonic() - t) * 1000, len(self.live_tools))
                     if hasattr(session, "warm"):
                         asyncio.create_task(session.warm())
+                    self.prepare_ack()
                     backoff = 1.0
                     if self.state in ("connecting", "error"):
                         await self.set_state("ready")
@@ -867,6 +1002,10 @@ class Buddy:
                 return
 
     async def _handle(self, msg):
+        if getattr(msg, "tool_call", None) and msg.tool_call.function_calls:
+            task = asyncio.create_task(self._run_tools(msg.tool_call.function_calls))
+            self.tool_tasks.add(task)
+            task.add_done_callback(self.tool_tasks.discard)
         if msg.session_resumption_update and msg.session_resumption_update.new_handle:
             self.resume_handle = msg.session_resumption_update.new_handle
         if msg.go_away:
@@ -1157,6 +1296,16 @@ class Buddy:
                 and time.monotonic() > self.player.last_audio + self.cfg["wake"]["squad_holdoff_s"])
 
     def _chime(self, to_squad):
+        """Say the wake reply ("Ahmm?") in the active voice; the beep only if it isn't ready."""
+        ack = self.ack_path()
+        if self.ack_conf()["enabled"] and ack.exists():
+            vol = int(max(0, min(150, int(self.cfg["ai_volume"]))) * 65536 / 100)
+            sinks = [self.cfg["headset_sink"]] + ([self.cfg["ps5_mic_sink"]] if to_squad else [])
+            for sink in sinks:
+                subprocess.Popen(["paplay", f"--device={sink}", f"--volume={vol}", str(ack)],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return
+        self.prepare_ack()
         path = STATE_DIR / "chime.wav"
         if not path.exists():
             t = np.arange(int(0.09 * 22050)) / 22050
@@ -1470,6 +1619,80 @@ def make_app(b: Buddy):
         local_backend._catalog_cache.clear()
         return web.json_response({"ok": True})
 
+    def _set_secret(key, value):
+        path = CONFIG_PATH.parent / "secrets.env"
+        lines = [l for l in path.read_text().splitlines() if not l.startswith(key + "=")] if path.exists() else []
+        if value:
+            lines.append(f"{key}={value}")
+        tmp = path.with_suffix(".new")
+        tmp.write_text("\n".join(lines) + "\n")
+        os.chmod(tmp, 0o600)
+        tmp.replace(path)
+
+    async def ack_get(r):
+        c = b.ack_conf()
+        return web.json_response({"ok": True, "enabled": c["enabled"], "text": c["text"],
+                                  "ready": b.ack_path().exists(), "profile": b.profile["id"]})
+
+    async def ack_put(r):
+        body = await r.json()
+        c = b.ack_conf()
+        if "enabled" in body:
+            c["enabled"] = bool(body["enabled"])
+        if "text" in body:
+            t = str(body["text"]).strip()[:40]
+            if not t:
+                return web.json_response({"ok": False, "error": "say something, e.g. Ahmm?"}, status=400)
+            c["text"] = t
+        b.profiles.save()
+        b.prepare_ack()
+        if b.ack_task:
+            try:
+                await asyncio.wait_for(asyncio.shield(b.ack_task), 20)
+            except Exception:
+                pass
+        return await ack_get(r)
+
+    async def mcp_get(r):
+        c = b.mcp_conf()
+        out = {"ok": True, "enabled": c["enabled"], "url": c["url"], "selected": c["tools"],
+               "defaults": mcp_client.DEFAULT_TOOLS, "token_set": bool(cfg["crcmz_token"]),
+               "tools_in_session": len(b.live_tools), "tools": [], "error": b.mcp_error}
+        if cfg["crcmz_token"]:
+            try:
+                if b.mcp is None or b.mcp.token != cfg["crcmz_token"] or b.mcp.url != c["url"]:
+                    b.mcp = mcp_client.CrcmzMCP(c["url"], cfg["crcmz_token"])
+                tools = await asyncio.wait_for(b.mcp.tools(force="refresh" in r.query), 12)
+                out["tools"] = [{"name": t["name"], "description": (t.get("description") or "")[:220]}
+                                for t in tools]
+                out["error"] = None
+            except Exception as e:
+                out["error"] = f"{type(e).__name__}: {str(e)[:160]}"
+        return web.json_response(out)
+
+    async def mcp_put(r):
+        body = await r.json()
+        c = b.mcp_conf()
+        if "token" in body:
+            tok = (body.get("token") or "").strip()
+            if tok and not re.fullmatch(r"(crcmz_|mcpa-)[A-Za-z0-9_\-]{16,}", tok):
+                return web.json_response({"ok": False, "error": "that doesn't look like a crcmz token (crcmz_...)"}, status=400)
+            _set_secret("CRCMZ_MCP_TOKEN", tok)
+            cfg["crcmz_token"] = tok
+            if b.mcp:
+                await b.mcp.close()
+            b.mcp = None
+        if "enabled" in body:
+            c["enabled"] = bool(body["enabled"])
+        if "url" in body and str(body["url"]).startswith("https://"):
+            c["url"] = str(body["url"])
+        if isinstance(body.get("tools"), list):
+            c["tools"] = [str(n) for n in body["tools"] if not mcp_client.is_write(str(n))][:40]
+        b.profiles.save()
+        if b.session_task and not b.session_task.done():
+            await b.use_profile(b.profile["id"])          # new tool set takes effect on reconnect
+        return await mcp_get(r)
+
     async def personality_get(r):
         return web.json_response({"ok": True, "text": b.personality(), "default": PERSONALITY,
                                   "custom": bool((b.profiles.data.get("personality") or "").strip())})
@@ -1503,6 +1726,8 @@ def make_app(b: Buddy):
         web.delete("/profiles/{pid}", profile_delete), web.post("/profiles/{pid}/use", profile_use),
         web.get("/catalog", catalog_get), web.get("/voices", voices_get),
         web.get("/personality", personality_get), web.put("/personality", personality_put),
+        web.get("/mcp", mcp_get), web.put("/mcp", mcp_put),
+        web.get("/ack", ack_get), web.put("/ack", ack_put),
         web.post("/voices/{name:[a-z0-9][a-z0-9_-]{0,31}}/record", voice_record),
         web.put("/voices/{name:[a-z0-9][a-z0-9_-]{0,31}}", voice_put),
         web.delete("/voices/{name:[a-z0-9][a-z0-9_-]{0,31}}", voice_delete),

@@ -46,6 +46,20 @@ def split_ready(text, first):
             return text[:m.end()].strip(), text[m.end():]
     return None, text
 THINK = re.compile(r"<think>.*?</think>\s*", re.S)
+FILLERS = ["Hold up, checking.", "One sec, pulling it up.", "Hang on, let me look.", "Lemme check the receipts."]
+
+
+def _json_args(text):
+    try:
+        v = json.loads(text or "{}")
+        return v if isinstance(v, dict) else {}
+    except ValueError:
+        return {}
+
+
+def openai_tools(tools):
+    from mcp_client import openai_tools as conv
+    return conv(tools)
 
 GEMINI_VOICES = ["Puck", "Charon", "Kore", "Fenrir", "Aoede", "Leda", "Orus", "Zephyr",
                  "Callirrhoe", "Autonoe", "Enceladus", "Iapetus", "Umbriel", "Algieba",
@@ -255,6 +269,13 @@ def _msg(**sc):
     return NS(session_resumption_update=None, go_away=None, usage_metadata=None, server_content=content)
 
 
+def pcm_to_wav(pcm, rate):
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1); w.setsampwidth(2); w.setframerate(rate); w.writeframes(pcm)
+    return buf.getvalue()
+
+
 def _wav_to_pcm24k(data):
     with wave.open(io.BytesIO(data)) as w:
         rate, ch, width = w.getframerate(), w.getnchannels(), w.getsampwidth()
@@ -271,8 +292,10 @@ def _wav_to_pcm24k(data):
 
 
 class LocalSession:
-    def __init__(self, cfg, profile, history, on_stage):
+    def __init__(self, cfg, profile, history, on_stage, mcp=None, tools=None):
         self.cfg, self.p = cfg, profile
+        self.mcp = mcp                    # crcmz MCP client (read-only tools), or None
+        self.tools = tools or []
         self.history = history            # deque of (user, assistant), bounded by the buddy
         self.on_stage = on_stage          # on_stage(name) -> records a timing on the turn
         self.audio = bytearray()
@@ -430,48 +453,23 @@ class LocalSession:
 
         sentences = asyncio.Queue()
         speaker = asyncio.create_task(self._speak(sentences))
-        reply, pending, in_think = "", "", False
+        reply = ""
         try:
-            async with self.client.stream("POST", self.base + "/chat/completions", json={
-                    "model": self.p["llm"], "messages": msgs, "stream": True,
-                    "max_tokens": int(self.p.get("max_tokens", 220)),
-                    "temperature": float(self.p.get("temperature", 0.8)),
-                    "chat_template_kwargs": {"enable_thinking": False}}) as resp:
-                resp.raise_for_status()
-                first = True
-                async for line in resp.aiter_lines():
-                    if not line.startswith("data:"):
-                        continue
-                    data = line[5:].strip()
-                    if data == "[DONE]":
-                        break
-                    try:
-                        delta = json.loads(data)["choices"][0].get("delta", {}).get("content") or ""
-                    except (ValueError, KeyError, IndexError):
-                        continue
-                    if not delta:
-                        continue
-                    if first:
-                        self.on_stage("llm_first_token_ms")
-                        first = False
-                    pending += delta
-                    if "<think>" in pending:
-                        in_think = True
-                    if in_think:
-                        if "</think>" not in pending:
-                            continue
-                        pending = THINK.sub("", pending)
-                        in_think = False
-                    while True:
-                        chunk, pending = split_ready(pending, first=not reply)
-                        if not chunk:
-                            break
-                        reply += (" " if reply else "") + chunk
-                        await sentences.put(chunk)
-            tail = THINK.sub("", pending).strip()
-            if tail:
-                reply += (" " if reply else "") + tail
-                await sentences.put(tail)
+            for _round in range(3):                    # at most two rounds of crcmz lookups
+                text_out, calls = await self._stream_llm(msgs, sentences, first_reply=not reply)
+                reply = (reply + " " + text_out).strip() if text_out else reply
+                if not calls or not self.mcp:
+                    break
+                if not text_out:                       # cover the lookup time with a filler line
+                    filler = FILLERS[int(time.time()) % len(FILLERS)]
+                    await sentences.put(filler)
+                self.on_stage("tool_call_ms")
+                msgs.append({"role": "assistant", "content": text_out or None, "tool_calls": [
+                    {"id": c["id"], "type": "function", "function": {"name": c["name"], "arguments": c["args"]}}
+                    for c in calls]})
+                results = await asyncio.gather(*(self.mcp.call(c["name"], _json_args(c["args"])) for c in calls))
+                for c, res in zip(calls, results):
+                    msgs.append({"role": "tool", "tool_call_id": c["id"], "name": c["name"], "content": res})
             await sentences.put(None)
             await speaker
         finally:
@@ -479,6 +477,61 @@ class LocalSession:
                 speaker.cancel()
         if reply:
             self.history.append((text, reply))
+
+    async def _stream_llm(self, msgs, sentences, first_reply):
+        """One streamed completion: speak text as it comes; return (text, tool calls)."""
+        body = {"model": self.p["llm"], "messages": msgs, "stream": True,
+                "max_tokens": int(self.p.get("max_tokens", 220)),
+                "temperature": float(self.p.get("temperature", 0.8)),
+                "chat_template_kwargs": {"enable_thinking": False}}
+        if self.tools and self.mcp:
+            body["tools"] = openai_tools(self.tools)
+        reply, pending, in_think, calls = "", "", False, {}
+        async with self.client.stream("POST", self.base + "/chat/completions", json=body) as resp:
+            resp.raise_for_status()
+            first = True
+            async for line in resp.aiter_lines():
+                if not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    d = json.loads(data)["choices"][0].get("delta", {})
+                except (ValueError, KeyError, IndexError):
+                    continue
+                for tc in d.get("tool_calls") or []:          # streamed in pieces, by index
+                    c = calls.setdefault(tc.get("index", 0), {"id": "", "name": "", "args": ""})
+                    c["id"] = tc.get("id") or c["id"]
+                    fn = tc.get("function") or {}
+                    c["name"] += fn.get("name") or ""
+                    c["args"] += fn.get("arguments") or ""
+                delta = d.get("content") or ""
+                if not delta:
+                    continue
+                if first:
+                    self.on_stage("llm_first_token_ms")
+                    first = False
+                pending += delta
+                if "<think>" in pending:
+                    in_think = True
+                if in_think:
+                    if "</think>" not in pending:
+                        continue
+                    pending = THINK.sub("", pending)
+                    in_think = False
+                while True:
+                    chunk, pending = split_ready(pending, first=first_reply and not reply)
+                    if not chunk:
+                        break
+                    reply += (" " if reply else "") + chunk
+                    await sentences.put(chunk)
+        tail = THINK.sub("", pending).strip()
+        if tail:
+            reply += (" " if reply else "") + tail
+            await sentences.put(tail)
+        out = [dict(c, id=c["id"] or f"call_{i}") for i, c in sorted(calls.items()) if c["name"]]
+        return reply, out
 
     async def _speak(self, sentences):
         first = True

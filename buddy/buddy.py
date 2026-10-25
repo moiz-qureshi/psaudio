@@ -891,8 +891,16 @@ class Buddy:
     def personality(self):
         return (self.profiles.data.get("personality") or "").strip() or PERSONALITY
 
-    def live_config(self):
+    def tool_hints(self):
+        """What the model is told about its tools, including that it can't send
+        anything when no write tool is on (it once claimed to have sent a message)."""
         hint = mcp_client.TOOL_HINT if self.live_tools else ""
+        if not any(mcp_client.is_write(t["name"]) for t in self.live_tools):
+            hint += mcp_client.NO_WRITE_HINT
+        return hint
+
+    def live_config(self):
+        hint = self.tool_hints()
         c = dict(self.cfg, voice=self.profile["voice"], system_instruction=self.personality() + hint)
         extra = {}
         if self.live_tools:
@@ -1000,7 +1008,7 @@ class Buddy:
     def _connect(self, client):
         p = self.profile
         if p["kind"] == "local":
-            hint = mcp_client.TOOL_HINT if self.live_tools else ""
+            hint = self.tool_hints()
             return local_backend.LocalSession(dict(self.cfg, system_instruction=self.personality() + hint),
                                               p, self.local_history, self._stage,
                                               mcp=self.mcp if self.live_tools else None, tools=self.live_tools,

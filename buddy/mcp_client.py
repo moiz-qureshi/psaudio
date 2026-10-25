@@ -164,6 +164,10 @@ def openai_tools(tools):
             for t in tools]
 
 
+NO_WRITE_HINT = (" You cannot send messages (WhatsApp, PSN, Mattermost), ring anyone, post, or "
+                 "change anything in any app; you have no tool for it. If someone asks you to, say "
+                 "straight up that you can't do that from here. Never claim you sent or did something.")
+
 TOOL_HINT = (" You can look things up in the squad's CRCMZ app (members, profiles, stats, "
              "leaderboards, PSN/Steam status, WhatsApp history, clips, tournaments, memories, and "
              "the Calgary trip: itinerary, stay, flights, who owes whom, packing, polls, food) "

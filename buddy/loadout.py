@@ -4,13 +4,16 @@
                                               attachment, then "Want me to go through it slow?"
   "yes"                                    -> "Primary, the VOYAK KT-3. Got it?"
   "next" / "got it" / "ok"                 -> the next piece        ("repeat", "back", "stop" work too)
-  "send it to my WhatsApp" / "PSN"         -> the class as text, through crcmz (WhatsApp DM or group,
-                                              PSN squad group - crcmz has no PSN DM)
+  "mosin nagant class" / "best m4 build"   -> that gun's recommended build (fuzzy on the name)
+  "send it" / "PSN"                        -> the class as text, through crcmz, to the WhatsApp
+                                              group or the PSN squad group (never a DM)
 
 Answers are built here, not by the model: names have to be exact and it is faster.
 API: https://wzmeta.interestingsoup.com/api (games mw4, warzone, bo6, bo7).
 """
 import re
+import time
+from difflib import SequenceMatcher
 
 import httpx
 
@@ -78,8 +81,75 @@ def _mode(text):
     return next((m for m in MODES if m in low), None)
 
 
+WEAPON_TYPES = [(r"\bshot ?guns?\b", "shotgun"), (r"\blmgs?\b|light machine", "lmg"),
+                (r"\bmarksman", "marksman-rifle"), (r"\bpistols?\b|\bhand ?guns?\b", "pistol"),
+                (r"\bsmgs?\b|sub ?machine", "smg"), (r"\bsnipers?\b", "sniper"),
+                (r"\bars?\b|assault rifles?", "assault-rifle")]
+
+
+def _wtype(text):
+    return next((t for pat, t in WEAPON_TYPES if re.search(pat, text, re.I)), None)
+
+
 def _category(text):
     return next((c for pat, c in CATEGORY if re.search(pat, text, re.I)), None)
+
+
+# Words in a class question that are never part of a gun's name (so "best" or "class"
+# can't fuzzy-match a gun that starts with those letters).
+NOT_GUN = {"what", "whats", "the", "best", "meta", "class", "classes", "build", "builds", "loadout",
+           "loadouts", "load", "out", "attachments", "attachment", "setup", "for", "on", "in", "give",
+           "me", "my", "a", "an", "of", "tell", "about", "gun", "weapon", "rifle", "smg", "sniper",
+           "warzone", "resurgence", "ranked", "multiplayer", "dmz", "pvp", "pve", "mw4", "bo6", "bo7",
+           "long", "close", "short", "range", "ranged", "fast", "quick", "good", "top", "new", "type",
+           "shotgun", "lmg", "marksman", "pistol", "launcher", "assault", "ar"}
+GUN_LIST_TTL = 6 * 3600
+
+
+def _norm(s):
+    return re.sub(r"[^a-z0-9]", "", (s or "").lower())
+
+
+def find_gun(text, guns):
+    """The gun named in `text`, or None. `guns` = [(weapon_id, name)].
+
+    Matches any phrasing ("mosin nagant class", "best build for the m4") against the real
+    names, glued together so "kt3" / "kt 3" / "KT-3" all match, and forgives the speech
+    recogniser's spelling ("mohsin nagant", "mozin") on names of 5+ letters. Short names
+    (M4, HDR) only match exactly, so "mw4" never becomes the M4."""
+    words = re.findall(r"[a-z0-9]+", text.lower())
+    best, best_score = None, 0.0
+    for wid, name in guns:
+        toks = re.findall(r"[a-z0-9]+", name.lower()) or [""]
+        n, k = _norm(name), len(toks)
+        for size in sorted({k, k + 1, max(1, k - 1)}):
+            for i in range(len(words) - size + 1):
+                span = words[i:i + size]
+                cand = "".join(span)
+                if cand == n:
+                    score = 1.0 + len(n) / 100          # exact ("type 73", "m4"); longer names win ties
+                elif span[0] in NOT_GUN or span[-1] in NOT_GUN:
+                    continue
+                elif len(cand) >= 4 and k > 1 and cand == "".join(toks[:size]):
+                    score = 0.88                        # the name's first word(s): "ppsh", "mosin", "kastov"
+                elif len(n) >= 5 and len(cand) >= 5:
+                    score = SequenceMatcher(None, cand, n).ratio()   # "mohsin nagant", "mozin nagant"
+                else:
+                    continue
+                if score > best_score:
+                    best, best_score = (wid, name), score
+    return best if best_score >= 0.82 else None
+
+
+def _best_build(builds, mode):
+    """The build wzstats recommends for this mode, else the first one for it, else any."""
+    for b in builds:
+        if mode and mode in (b.get("best_for_modes") or []):
+            return b
+    for b in builds:
+        if b.get("best_for_modes"):
+            return b
+    return builds[0] if builds else None
 
 
 def _gun_lines(w):
@@ -94,6 +164,7 @@ class Loadouts:
         self.offer = None        # steps waiting for a yes to "go through it slow?"
         self.steps, self.i = [], 0
         self.written = []        # the class as text messages (<= 500 chars each), for "send it"
+        self._guns = {}          # game -> (fetched_at, [(weapon_id, name)])
 
     async def aclose(self):
         await self.http.aclose()
@@ -110,26 +181,60 @@ class Loadouts:
         r.raise_for_status()
         return r.json()
 
+    async def guns(self, game):
+        """Every gun the game ranks in any mode, cached for a few hours."""
+        hit = self._guns.get(game)
+        if hit and time.monotonic() - hit[0] < GUN_LIST_TTL:
+            return hit[1]
+        info = await self._get(f"/games/{game}")
+        seen = {}
+        for m in info.get("modes") or []:
+            for w in (await self._get(f"/games/{game}/tier-list", mode=m["id"])).get("weapons") or []:
+                seen.setdefault(w["weapon_id"], w["name"])
+        self._guns[game] = (time.monotonic(), list(seen.items()))
+        return self._guns[game][1]
+
     async def answer(self, text, scene_game="", can_send=False):
         """The class (and the steps for a slow read), or None if this isn't a class question."""
         if not CLASS_Q.search(text):
             return None
         game, mode, cat = _game(text, scene_game), _mode(text), _category(text)
-        guns = []
-        m = WEAPON_Q.search(text)
-        if m and not re.fullmatch(r"(warzone|resurgence|ranked|multiplayer|me|it|this|that)", m["w"].strip(), re.I):
-            hits = [h for h in (await self._get("/search", q=m["w"].strip(), game=game)).get("results") or []
-                    if h.get("score", 0) >= 0.6]
-            if not hits:                                  # not in this game: any game that has it
-                hits = [h for h in (await self._get("/search", q=m["w"].strip())).get("results") or []
-                        if h.get("score", 0) >= 0.6]
-                if hits:
-                    game = hits[0].get("game", game)
-            if hits:
-                d = await self._get(f"/games/{game}/weapons/{hits[0]['weapon_id']}", mode=mode)
-                builds = d.get("builds") or []
-                if builds:
-                    guns = [{"name": d.get("name"), "type": d.get("type"), "build": builds[0]}]
+        guns, note = [], ""
+        hit = find_gun(text, await self.guns(game))
+        if not hit:                                       # not in this game: any game that has it
+            for other in ("mw4", "warzone", "bo7", "bo6"):
+                if other != game and (hit := find_gun(text, await self.guns(other))):
+                    game = other
+                    break
+        # The spoken mode as this game's mode id ("dmz pvp" -> dmz-pvp); one it doesn't have is dropped
+        info = await self._get(f"/games/{game}")
+        modes = info.get("modes") or []
+        ids = {_norm(x): m["id"] for m in modes for x in (m["id"], m["name"])}
+        if mode and _norm(mode) not in ids:
+            note = f"{info.get('name', game)} has no {mode}, so here's {(modes or [{}])[0].get('name', 'the main mode')}. "
+        mode = ids.get(_norm(mode)) if mode else None
+        if hit:
+            d = await self._get(f"/games/{game}/weapons/{hit[0]}", mode=mode)
+            b = _best_build(d.get("builds") or [], mode or (modes or [{}])[0].get("id"))
+            if not b:
+                return f"The meta site has no build for the {speakable(d.get('name', hit[1]))} yet.", []
+            guns = [{"name": d.get("name"), "type": d.get("type"), "build": b}]
+            if mode and mode not in (b.get("modes") or []) and b.get("modes"):
+                names = {m["id"]: m["name"] for m in modes}
+                note = f"No {names.get(mode, mode)} build for that one, here's the {names.get(b['modes'][0], b['modes'][0])} one. "
+                mode = b["modes"][0]
+        else:
+            m = WEAPON_Q.search(text)                     # "class for the <something we don't know>"
+            if m and not re.fullmatch(r"(warzone|resurgence|ranked|multiplayer|me|it|this|that|"
+                                      r"smgs?|ars?|snipers?|shotguns?|lmgs?|long range|close range)",
+                                      m["w"].strip(), re.I):
+                return f"Couldn't find a gun called {m['w'].strip()} on the meta site.", []
+        wtype = _wtype(text)
+        if not guns and wtype:                            # "best shotgun", "marksman rifle class"
+            try:
+                guns = (await self._get(f"/games/{game}/meta", mode=mode, type=wtype, limit=1)).get("meta") or []
+            except httpx.HTTPStatusError:                 # a type this game doesn't have
+                guns = []
         if not guns and cat:
             guns = (await self._get(f"/games/{game}/meta", mode=mode, category=cat, limit=1)).get("meta") or []
         if not guns:          # a full class: best long-range + best close-range
@@ -142,11 +247,10 @@ class Loadouts:
                 guns = (await self._get(f"/games/{game}/meta", mode=mode, limit=2)).get("meta") or []
         if not guns:
             return "The meta site has nothing for that one.", []
-        info = await self._get(f"/games/{game}")
         mname = next((x["name"] for x in info.get("modes", []) if x["id"] == mode or x["name"].lower() == (mode or "")),
                      (info.get("modes") or [{}])[0].get("name", ""))
         title = f"{info.get('name', game)} {mname}".strip()
-        say, steps, written = [f"{title}:"], [], []
+        say, steps, written = [f"{note}{title}:"], [], []
         for n, w in enumerate(guns):
             gun, typ, atts = _gun_lines(w)
             role = ("Primary" if n == 0 else "Secondary") if len(guns) > 1 else "Run"

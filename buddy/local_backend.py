@@ -83,7 +83,9 @@ RECAP_Q = re.compile(
     r"\b(what\s+(?:just\s+)?happened|what\s+(?:am\s+i|was\s+i|is\s+he|was\s+he)\s+doing|what\s+was\s+that|"
     r"what\s+did\s+(?:i|he|you\s+see)|did\s+you\s+(?:see|watch|catch)\s+(?:that|this|what|it|me)|you\s+see\s+that|"
     r"how(?:\s+did|'d)\s+(?:i|he|that|we|it)\s+(?:do|go|play)|how\s+was\s+(?:that|my|i)|rate\s+(?:that|my|me)|"
-    r"watch\s+(?:that|this|me)|what\s*(?:'s|\s+is)\s+(?:going\s+on|happening)|look\s+at\s+(?:that|this|my|me))\b", re.I)
+    r"watch\s+(?:that|this|me)|what\s*(?:'s|\s+is)\s+(?:going\s+on|happening)|look\s+at\s+(?:that|this|my|me)|"
+    r"what\s+(?:do|can)\s+you\s+see|can\s+you\s+see|what\s*(?:'?s|\s+is)\s+on\s+(?:my|the)\s+screen|"
+    r"what\s+am\s+i\s+(?:looking\s+at|seeing)|see\s+my\s+screen)\b", re.I)
 # Whisper on laughter/noise can loop ("ahahahahah..." until it runs out of tokens): that is
 # both the nonsense question and the 5-20 s wait. Cap the decode and collapse the loops.
 CHAR_LOOP = re.compile(r"([a-z]{1,6}?)\1{3,}", re.I)                       # "ahahahahah"

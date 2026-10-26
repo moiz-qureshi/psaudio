@@ -1,0 +1,18 @@
+services:
+  ps5-stream-dns:
+    build: .
+    container_name: ps5-stream-dns
+    network_mode: host            # answers on 192.168.5.54:53 only (systemd-resolved keeps 127.0.0.53)
+    cap_add: [NET_ADMIN]
+    volumes:
+      - ./dnsmasq.conf:/etc/dnsmasq.conf:ro
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options: {max-size: "5m", max-file: "2"}
+    labels:
+      - homepage.group=Infrastructure
+      - homepage.name=PS5 Stream DNS
+      - homepage.description=Sends the PS5's Twitch broadcast to the MacBook
+      - homepage.icon=mdi-sony-playstation
+      - homepage.href=http://192.168.4.38:8898/health

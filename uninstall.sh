@@ -9,11 +9,11 @@ HOME_DIR=$(getent passwd "$PSAUDIO_USER" | cut -d: -f6 || true)
 UID_N=$(id -u "$PSAUDIO_USER" 2>/dev/null || true)
 
 if [ -n "$UID_N" ]; then
-  runuser -u "$PSAUDIO_USER" -- env XDG_RUNTIME_DIR="/run/user/$UID_N" systemctl --user disable --now psaudio-mic-fx psaudio-configure 2>/dev/null || true
+  runuser -u "$PSAUDIO_USER" -- env XDG_RUNTIME_DIR="/run/user/$UID_N" systemctl --user disable --now psaudio-mic-fx psaudio-configure psaudio-route-guard 2>/dev/null || true
 fi
 systemctl disable --now psaudio-gadget.service 2>/dev/null || true
 rm -f /etc/systemd/system/psaudio-gadget.service /etc/tmpfiles.d/psaudio.conf \
-      /usr/local/bin/psaudio-ctl /usr/local/bin/psaudio-ctl-ssh /usr/local/bin/psaudio-gadget-setup /usr/local/bin/psaudio-mic-fx-run
+      /usr/local/bin/psaudio-ctl /usr/local/bin/psaudio-ctl-ssh /usr/local/bin/psaudio-gadget-setup /usr/local/bin/psaudio-mic-fx-run /usr/local/bin/psaudio-route-guard
 rm -rf /usr/local/lib/psaudio /opt/psaudio
 if [ -n "$HOME_DIR" ]; then
   rm -f "$HOME_DIR"/.config/systemd/user/psaudio-*.service "$HOME_DIR"/.config/systemd/user/default.target.wants/psaudio-*.service \

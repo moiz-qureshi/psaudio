@@ -1,0 +1,111 @@
+#!/usr/bin/env python3
+"""psaudio-route-guard: keep every audio stream on the device it was made for.
+
+When the A50 X drops for a moment (power, range, dongle), PipeWire moves its streams to
+the default device and never moves them back. The worst case: the mic-effects recorder
+lands on the PS5's incoming audio and feeds the party back into the PS5 mic, so friends
+hear themselves and your own voice never goes out.
+
+This guard listens to PipeWire (pactl subscribe, plus a check every 10 s) and for each
+playback/recording stream that names a target (target.object):
+  - target present but the stream is elsewhere  -> move it back
+  - target missing and the stream fell elsewhere -> park it on a silent null device
+    ("psaudio_void") until the target is back. Never mutes anything: WirePlumber remembers
+    mute per app, so a mute could stick to the next mic-fx run and silence you.
+It also keeps the headset mic as the default source, so anything that does fall back
+lands on the mic, never on the PS5 feed. Logs every change to the journal.
+"""
+import json
+import subprocess
+import sys
+import threading
+import time
+
+MIC = "alsa_input.usb-Logitech_A50_X-00.mono-fallback"   # preferred default source
+VOID = "psaudio_void"                                      # silent parking spot (sink + .monitor)
+CHECK_EVERY_S = 10
+
+
+def log(msg):
+    print(msg, flush=True)
+
+
+def pactl(*args, check=False):
+    return subprocess.run(["pactl", *args], capture_output=True, text=True, timeout=5, check=check)
+
+
+def listed(kind):
+    try:
+        return json.loads(pactl("-f", "json", "list", kind, check=True).stdout or "[]")
+    except (subprocess.SubprocessError, ValueError):
+        return []
+
+
+def ensure_void(sinks):
+    if VOID not in sinks.values():
+        pactl("load-module", "module-null-sink", f"sink_name={VOID}",
+              "sink_properties=device.description=psaudio-void node.passive=true priority.session=1")
+        return True
+    return False
+
+
+def check():
+    sinks = {s["index"]: s["name"] for s in listed("sinks")}
+    if ensure_void(sinks):
+        sinks = {s["index"]: s["name"] for s in listed("sinks")}
+    sources = {s["index"]: s["name"] for s in listed("sources")}
+    if MIC in sources.values():
+        if pactl("get-default-source").stdout.strip() != MIC:
+            pactl("set-default-source", MIC)
+            log(f"default source -> {MIC}")
+    for kind, nodes, field, move, void in (
+            ("source-outputs", sources, "source", "move-source-output", VOID + ".monitor"),
+            ("sink-inputs", sinks, "sink", "move-sink-input", VOID)):
+        for s in listed(kind):
+            props = s.get("properties") or {}
+            want = props.get("target.object") or ""
+            if not want or want.isdigit():
+                continue                                  # no named target: not ours to judge
+            if field == "source" and want in sinks.values():
+                want += ".monitor"                        # recording a sink = its monitor source
+            cur = nodes.get(s[field], "")
+            name = props.get("media.name") or props.get("node.name") or str(s["index"])
+            if cur == want or (cur == void and want not in nodes.values()):
+                continue                                  # where it belongs / parked, waiting
+            to = want if want in nodes.values() else void   # e.g. mic recorder fell onto the PS5 feed
+            r = pactl(move, str(s["index"]), to)
+            if r.returncode == 0:
+                log(f"{name}: was on {cur or '?'}, moved to {to}"
+                    + ("" if to == want else f" until {want} is back"))
+            else:
+                log(f"{name}: move to {to} failed: {r.stderr.strip()}")
+
+
+def main():
+    wake = threading.Event()
+
+    def subscribe():
+        while True:
+            try:
+                p = subprocess.Popen(["pactl", "subscribe"], stdout=subprocess.PIPE, text=True)
+                for line in p.stdout:
+                    if any(w in line for w in ("sink", "source", "card", "server")):
+                        wake.set()
+            except OSError:
+                pass
+            time.sleep(2)                                  # pipewire-pulse restarted: resubscribe
+
+    threading.Thread(target=subscribe, daemon=True).start()
+    log("route guard running")
+    while True:
+        try:
+            check()
+        except Exception as e:                             # never die: this keeps the mic working
+            log(f"check failed: {type(e).__name__} {e}")
+        wake.wait(CHECK_EVERY_S)
+        wake.clear()
+        time.sleep(0.4)                                    # let a burst of events settle
+
+
+if __name__ == "__main__":
+    sys.exit(main())

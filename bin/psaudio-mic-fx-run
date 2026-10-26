@@ -21,6 +21,21 @@ esac
 
 echo "psaudio-mic-fx: effect=$EFFECT $SRC -> $DST" >&2
 
-/usr/bin/ffmpeg -f pulse -fragment_size 960 -i "$SRC" -af "$FILTER" -ar 48000 -ac 1 -f s16le - 2>/dev/null | \
-  pacat --playback --format=s16le --rate=48000 --channels=1 --latency-msec=40 \
-        --device="$DST" --stream-name="psaudio-mic-fx"
+if [ "$FILTER" = anull ]; then
+  # No effect: a native PipeWire loopback. It resamples adaptively between the headset's and
+  # the console's USB clocks, so the delay stays ~30 ms however long it runs. (ffmpeg | pacat
+  # can't: the clock difference piled up in its buffers, ~40 s behind after a day.)
+  exec pw-loopback --name psaudio-mic-fx --channels 1 --channel-map "[ MONO ]" --latency 30 \
+    --capture "$SRC" --playback "$DST" \
+    --capture-props "node.name=psaudio-mic-in media.name=psaudio-mic-in" \
+    --playback-props "node.name=psaudio-mic-fx media.name=psaudio-mic-fx"
+fi
+
+# Effects need ffmpeg, which can't follow the console's clock: restart it every 15 min so the
+# drift can never build up past a fraction of a second (a ~0.3 s blip each time).
+while true; do
+  /usr/bin/ffmpeg -f pulse -fragment_size 960 -i "$SRC" -t 900 -af "$FILTER" -ar 48000 -ac 1 -f s16le - 2>/dev/null | \
+    pacat --playback --format=s16le --rate=48000 --channels=1 --latency-msec=40 \
+          --device="$DST" --stream-name="psaudio-mic-fx"
+  sleep 0.2
+done

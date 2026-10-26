@@ -66,7 +66,7 @@ HOME_DIR=$(getent passwd "$PSA_USER" | cut -d: -f6)
 # -- files ---------------------------------------------------------------------
 say "Scripts and config"
 install -d /usr/local/lib/psaudio /etc/psaudio
-install -m 0755 "$SRC"/bin/psaudio-ctl "$SRC"/bin/psaudio-ctl-ssh "$SRC"/bin/psaudio-gadget-setup "$SRC"/bin/psaudio-mic-fx-run /usr/local/bin/
+install -m 0755 "$SRC"/bin/psaudio-ctl "$SRC"/bin/psaudio-ctl-ssh "$SRC"/bin/psaudio-gadget-setup "$SRC"/bin/psaudio-mic-fx-run "$SRC"/bin/psaudio-route-guard /usr/local/bin/
 install -m 0644 "$SRC/lib/common.sh" "$SRC/pipewire/20-loopbacks.conf.in" /usr/local/lib/psaudio/
 echo "$VERSION" > /usr/local/lib/psaudio/VERSION
 if [ ! -f /etc/psaudio/psaudio.conf ]; then
@@ -94,7 +94,7 @@ U -d "$HOME_DIR/.config" "$HOME_DIR/.config/systemd" "$HOME_DIR/.config/systemd/
      "$HOME_DIR/.config/wireplumber" "$HOME_DIR/.config/wireplumber/wireplumber.conf.d" "$HOME_DIR/sounds"
 U -m 0644 "$SRC/pipewire/10-psaudio.conf" "$HOME_DIR/.config/pipewire/pipewire.conf.d/"
 U -m 0644 "$SRC/wireplumber/50-psaudio-policy.conf" "$HOME_DIR/.config/wireplumber/wireplumber.conf.d/"
-U -m 0644 "$SRC/systemd/user/psaudio-mic-fx.service" "$SRC/systemd/user/psaudio-configure.service" "$HOME_DIR/.config/systemd/user/"
+U -m 0644 "$SRC/systemd/user/psaudio-mic-fx.service" "$SRC/systemd/user/psaudio-configure.service" "$SRC/systemd/user/psaudio-route-guard.service" "$HOME_DIR/.config/systemd/user/"
 
 # enable user units without a running user manager (works in a chroot too)
 W=$HOME_DIR/.config/systemd/user
@@ -105,6 +105,7 @@ link /usr/lib/systemd/user/pipewire.socket        "$W/sockets.target.wants/pipew
 link /usr/lib/systemd/user/pipewire-pulse.socket  "$W/sockets.target.wants/pipewire-pulse.socket"
 link /usr/lib/systemd/user/wireplumber.service    "$W/pipewire.service.wants/wireplumber.service"
 link "$W/psaudio-mic-fx.service"    "$W/default.target.wants/psaudio-mic-fx.service"
+link "$W/psaudio-route-guard.service" "$W/default.target.wants/psaudio-route-guard.service"
 link "$W/psaudio-configure.service" "$W/default.target.wants/psaudio-configure.service"
 
 # the audio stack runs at boot, with nobody logged in
@@ -163,7 +164,7 @@ if [ "$NEED_REBOOT" = 0 ] && [ -d /sys/class/udc ] && [ -n "$(ls /sys/class/udc 
   systemctl start "user@$UID_N.service" || true
   runuser -u "$PSA_USER" -- env XDG_RUNTIME_DIR="/run/user/$UID_N" systemctl --user daemon-reload || true
   runuser -u "$PSA_USER" -- env XDG_RUNTIME_DIR="/run/user/$UID_N" systemctl --user restart pipewire pipewire-pulse wireplumber || true
-  runuser -u "$PSA_USER" -- env XDG_RUNTIME_DIR="/run/user/$UID_N" systemctl --user restart psaudio-configure psaudio-mic-fx || true
+  runuser -u "$PSA_USER" -- env XDG_RUNTIME_DIR="/run/user/$UID_N" systemctl --user restart psaudio-configure psaudio-mic-fx psaudio-route-guard || true
   say "Done. Check it with: sudo -u $PSA_USER XDG_RUNTIME_DIR=/run/user/$UID_N psaudio-ctl status"
 else
   say "Done — reboot to switch the USB-C port into sound-card mode: sudo reboot"

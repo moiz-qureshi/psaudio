@@ -122,6 +122,7 @@ class SquadMode:
         self.vision_task = None
         self.client = None
         self.lines = collections.deque(maxlen=80)      # (t, who, text, handled)
+        self.dropped = collections.deque(maxlen=20)    # debug: what the Whisper filters threw away
         self.notes = collections.deque(maxlen=12)      # (t, text)
         self.static_s = 0
         self.live = False
@@ -136,7 +137,9 @@ class SquadMode:
         self.stt_busy = 0
         self.last_moiz = time.monotonic()
         self.stats = {"heard": 0, "spoke": 0, "passed": 0, "frames": 0}
-        self.segs = {"mic": Segmenter("mic", self._utterance, abs_min=320.0),
+        # A50 X mic (measured 2026-10-26): floor ~20 RMS, speech ~100-900; the squad side
+        # always has game sound under it, so it keeps a higher bar
+        self.segs = {"mic": Segmenter("mic", self._utterance, abs_min=60.0, ratio=3.0, min_s=0.35),
                      "squad": Segmenter("squad", self._utterance, quiet_s=0.6)}
         self.segs["squad"].enabled = self._squad_ok
 
@@ -240,11 +243,12 @@ class SquadMode:
     def _utterance(self, name, pcm):
         if not self.on:
             return
-        handled = self._busy()                     # a PTT / wake question: the normal turn answers it
         if name == "mic":
             self.last_moiz = time.monotonic()
         self.b.last_use = time.monotonic()        # keeps the AI session from timing out
-        asyncio.create_task(self._transcribe(name, pcm, handled))
+        if self._busy():
+            return       # the AI key / wake word owns this one: keep the Mac's GPU for its answer
+        asyncio.create_task(self._transcribe(name, pcm, False))
 
     async def _transcribe(self, name, pcm, handled):
         self.stt_busy += 1
@@ -265,6 +269,9 @@ class SquadMode:
                 and s.get("compression_ratio", 1) < 2.4 and s.get("no_speech_prob", 0) < 0.6]
         text = " ".join(s.get("text", "").strip() for s in segs).strip() if d.get("segments") else d.get("text", "").strip()
         if not text or HALLUCINATION.match(text) or len(text) < 2:
+            self.dropped.append({"who": name, "raw": (d.get("text") or "")[:120],
+                                 "seg": [(round(x.get("avg_logprob", 0), 2), round(x.get("no_speech_prob", 0), 2))
+                                         for x in (d.get("segments") or [])][:4]})
             return
         who = "Moiz" if name == "mic" else "Squad"
         self.lines.append((time.monotonic(), who, text, handled))
@@ -499,6 +506,13 @@ class SquadMode:
         finally:
             self.speaking = self.cutting = False
             self.b.bump()
+
+    def name_only(self, source):
+        """'Hey Hasaan' and then nothing: in the party that means 'you there?' - answer it."""
+        if not self.on:
+            return
+        self.lines.append((time.monotonic(), "Moiz" if source == "mic" else "Squad", "Hey Hasaan?", False))
+        self._trigger("addressed")
 
     def recent_chat(self, seconds=90):
         """For the AI key's answers: what was just said in the party."""

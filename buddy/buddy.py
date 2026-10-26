@@ -1459,6 +1459,7 @@ class Buddy:
                 and not self.turn.get("heard_speech"):
             log.info("wake word (%s) but no question; cancelled", name)
             await self._end_listen(submit=False)
+            self.squad_mode.name_only(name)
 
     def _squad_may_wake(self):
         """Squad wake only when nobody is asking and the AI has been quiet a moment,
@@ -1684,6 +1685,14 @@ def make_app(b: Buddy):
         secs = await b.feed_file(p, mode="roast" if body.get("mode") == "roast" else "")
         b._test_source = None
         return web.json_response({"ok": True, "fed_s": secs, **b.status()})
+
+    async def squad_heard(r):
+        """Debug: the last lines squad mode heard (memory only, never stored)."""
+        now = time.monotonic()
+        sm = b.squad_mode
+        return web.json_response({"ok": True, "lines": [
+            {"ago_s": round(now - t), "who": who, "text": text, "handled": h} for t, who, text, h in list(sm.lines)[-15:]],
+            "dropped": list(sm.dropped)[-10:]})
 
     async def test_squad(r):
         """Test hook: inject a party line (who = Moiz | Squad), as if Whisper heard it."""
@@ -2054,7 +2063,7 @@ def make_app(b: Buddy):
         web.post("/press", press), web.post("/release", release),
         web.post("/talk/start", talk_start), web.post("/talk/end", talk_end),
         web.post("/stop", stop), web.post("/arm", arm), web.post("/disarm", disarm),
-        web.post("/toggle", toggle), web.post("/volume", volume), web.post("/squad", squad), web.post("/test/squad", test_squad),
+        web.post("/toggle", toggle), web.post("/volume", volume), web.post("/squad", squad), web.post("/test/squad", test_squad), web.get("/squad/heard", squad_heard),
         web.get("/status", status), web.get("/history", history),
         web.post("/test/feed", test_feed), web.get("/health", health),
         web.get("/profiles", profiles_get), web.put("/profiles/{pid}", profile_put),

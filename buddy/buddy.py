@@ -706,7 +706,7 @@ class Buddy:
             m, which = d["recent"][-1], "Last match (none being played right now)"
         if m:
             mode = f" ({m['mode'].title()})" if m.get("mode") else ""
-            lines.append(f"{which}: {m.get('game_name') or m.get('game')}{mode}"
+            lines.append(f"{which}: {m.get('game_name') or m.get('game')}{mode}" + (f" on {m['map'].title()}" if m.get("map") else "")
                          + (f", score {m['score']} (top number first, as on his HUD)" if m.get("score") else ""))
             rd = m.get("rounds") or {}
             if rd.get("won") or rd.get("lost"):
@@ -727,8 +727,10 @@ class Buddy:
             if named:                                         # a misread board puts numbers in the name column
                 sb = dict(sb, rows=named)
                 lines.append("Scoreboard: " + "; ".join(
-                    f"{r['name']} {r.get('kills')}-{r.get('deaths')}" + (f" ({r['status']})" if r.get("status") else "")
-                    + (" [squad]" if r.get("squad") else "") for r in sb["rows"][:12]))
+                    f"{r['name']}" + (" (you)" if r.get("me") else "") + f" {r.get('kills')} kills"
+                    + (f"/{r['deaths']} deaths" if r.get("deaths") is not None else "")
+                    + (f", {r['team']}" if r.get("team") else "") + (" [squad]" if r.get("squad") and not r.get("me") else "")
+                    for r in sb["rows"][:12]))
         for g, t in (d.get("today") or {}).items():
             lines.append(f"Today in {g}: {t['matches']} matches, {t['kills']} kills, {t['deaths']} deaths")
         if not lines:

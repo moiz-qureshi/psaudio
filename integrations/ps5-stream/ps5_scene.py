@@ -399,7 +399,8 @@ HUD_PROFILES = [
     {"id": "cod", "match": r"call of duty|modern warfare|warzone|black ops|\bmw\d?\b|\bbo\d\b|\bcod\b",
      "crop": (0.0, 0.0, 0.36, 1.0),
      "prompt": ("The left side of a Call of Duty screen at full resolution. Read only what is there:\n"
-                "MODE: the game mode name, or -\n"
+                "MODE: the game mode name written under the minimap (e.g. DOMINATION, SEARCH AND DESTROY, "
+                "TEAM DEATHMATCH), not objective words like DEFEND or CAPTURE, or -\n"
                 "SCORE: the two team score numbers on the left, top number first, like 1-4, or -\n"
                 "FEED: one line per kill-feed entry, newest last, as killer > victim (weapon only if it "
                 "is written as text), or FEED: - if there is no kill feed. The kill feed is the small list "
@@ -418,6 +419,18 @@ CARD_PROMPT = ("A death / kill-cam screen. Read only what is there, one per line
                "KILLED BY: the killer's gamertag exactly as written, or -\n"
                "KILLED WITH: the weapon, or -\n"
                "BUILD: the attachments listed with the weapon, comma separated, or -")
+COD_BOARD_PROMPT = ("A Call of Duty scoreboard (or a round-result screen). Read exactly what is written, one item per line:\n"
+    "BANNER: big result text such as ROUND WIN, ROUND LOSS, VICTORY or DEFEAT and the reason under it, or -\n"
+    "MODE: the mode name top right, or -\n"
+    "MAP: the map name under the mode, or -\n"
+    "TEAMS: left big score - right big score, or -\n"
+    "Then one line per player row: the LEFT table first (the player's team), then the RIGHT table (enemies), as\n"
+    "us or them | gamertag exactly as written | score | kills | the column after kills | dead (yes if a skull icon is next to the name, else no)\n"
+    "ME: eliminations | deaths | ratio, from the player card at the bottom, or ME: -")
+CARD_BOX = (0.18, 0.84, 0.66, 0.12)       # the player's own card under a CoD scoreboard
+ME_PROMPT = ("The player card under a Call of Duty scoreboard. Answer with ONE line: eliminations | deaths | "
+             "ratio, the three numbers exactly as written, or - if they aren't there.")
+BOARD_FULL_EVERY_S = 90                    # the whole table is slow (~30 s busy GPU): now and then
 BOARD_PROMPT = ("A game scoreboard or round-result screen. First line: BANNER: big result text such as "
                 "ROUND WIN, ROUND LOSS, VICTORY or DEFEAT, plus the reason under it (e.g. JSOF ELIMINATED), or -. "
                 "Then one line per player on a scoreboard, top to bottom, as: team | gamertag | kills | deaths | "
@@ -641,7 +654,7 @@ def settle_death(m, card=None):
     mate = (is_mate(raw) or (not raw and p.get("mate"))) and not is_me(raw or killer)   # label only
     if killer and is_me(killer):
         m["kills"] += 1
-        m["victims"].append("(final kill)")
+        m["victims"].append("final kill")
         add_event(f"{my_names()[0]} got the final kill" + (f" with {card['KILLED WITH']}" if card.get("KILLED WITH") else ""))
     elif final:                            # the round-end cam: not his death
         add_event("final kill" + (f" by {killer}" if killer else "") + (f" ({card['KILLED WITH']})" if card.get("KILLED WITH") else ""))
@@ -694,11 +707,34 @@ def read_hud(jpg, game):
     return mode, score, feed
 
 
-def read_board(jpg):
-    rows, teams, banner = [], None, None
-    for line in vlm(shrink(jpg, 1600), BOARD_PROMPT, 450).splitlines():
-        if line.upper().startswith("BANNER:"):
-            banner = field(line[7:])
+def read_board(jpg, game=""):
+    cod = hud_profile(game)["id"] == "cod"
+    rows, teams, banner, me, mode, mapname = [], None, None, None, None, None
+    num = lambda s: int(s) if s and s.isdigit() else None
+    for line in vlm(shrink(jpg, 1600), COD_BOARD_PROMPT if cod else BOARD_PROMPT, 500).splitlines():
+        u = line.strip().upper()
+        if u.startswith("BANNER:"):
+            banner = field(line.split(":", 1)[1])
+            continue
+        if u.startswith("MODE:"):
+            mode = field(line.split(":", 1)[1])
+            continue
+        if u.startswith("MAP:"):
+            mapname = field(line.split(":", 1)[1])
+            continue
+        if u.startswith("ME:"):
+            q = [field(x) for x in line.split(":", 1)[1].split("|")]
+            if len(q) >= 2 and num(q[0]) is not None and num(q[1]) is not None:
+                me = {"kills": num(q[0]), "deaths": num(q[1]), "ratio": q[2] if len(q) > 2 else None}
+            continue
+        if cod and "|" in line and not u.startswith("TEAMS:"):
+            q = [field(x) for x in line.split("|")]
+            if len(q) >= 4 and q[1] and re.search(r"[A-Za-z]", q[1]):
+                rows.append({"team": "us" if (q[0] or "").lower().startswith("us") else "them",
+                             "name": clean_name(q[1]), "score": num(q[2]), "kills": num(q[3]),
+                             "extra": num(q[4]) if len(q) > 4 else None,
+                             "status": "dead" if len(q) > 5 and (q[5] or "").lower().startswith("y") else "alive",
+                             "me": is_me(q[1]), "squad": is_mate(q[1])})
             continue
         if line.upper().startswith("TEAMS:"):
             m = SCORE_RE.match(line[6:].strip() or "")
@@ -710,7 +746,10 @@ def read_board(jpg):
             rows.append({"team": p[0], "name": clean_name(p[1]), "kills": num(p[2]), "deaths": num(p[3]),
                          "score": num(p[4]), "status": p[5] if len(p) > 5 else None, "me": is_me(p[1]),
                          "squad": is_mate(p[1])})
-    return {"t": time.time(), "rows": rows[:24], "teams": teams, "banner": banner} if (rows or banner) else None
+    if cod and len(rows) < 3 and not me and not banner:
+        return None                                  # not really a scoreboard (the describer guessed)
+    return {"t": time.time(), "rows": rows[:24], "teams": teams, "banner": banner, "me": me,
+            "mode": mode, "map": mapname} if (rows or banner or me) else None
 
 
 def note_banner(m, banner):
@@ -752,20 +791,36 @@ def hud_loop():
                 with lock:
                     settle_death(cur_match())               # never got a card: count what the screen said
             if scr == "scoreboard":
-                board = read_board(jpg)
+                board = None
+                if hud_profile(game)["id"] == "cod":   # quick: just his own line, every time it's open
+                    q = [field(x) for x in (vlm(crop(jpg, CARD_BOX), ME_PROMPT, 16).splitlines() or [""])[0].split("|")]
+                    if len(q) >= 2 and all((x or "").isdigit() for x in q[:2]):
+                        with lock:
+                            m = cur_match()
+                            m["kills"], m["deaths"] = int(q[0]), int(q[1])
+                            save_matches()
+                if time.time() - matches.get("board_t", 0) > BOARD_FULL_EVERY_S:
+                    matches["board_t"] = time.time()
+                    board = read_board(jpg, game)
                 if board:
                     with lock:
                         m = cur_match()
                         note_banner(m, board.get("banner"))
+                        if board.get("mode"):
+                            m["mode"] = board["mode"]        # the scoreboard's mode is the real one
+                        if board.get("map"):
+                            m["map"] = board["map"]
+                        if board.get("me"):                  # the player card: exact, wins over counting
+                            m["kills"], m["deaths"] = board["me"]["kills"], board["me"]["deaths"]
                         if board["rows"]:
                             m["scoreboard"] = board
-                        mine = next((r for r in board["rows"] if r["me"]), None)
+                        mine = None if board.get("me") else next((r for r in board["rows"] if r["me"]), None)
                         if mine and mine.get("kills") is not None:
                             m["kills"] = max(m["kills"], mine["kills"])
                         if mine and mine.get("deaths") is not None:
                             m["deaths"] = max(m["deaths"], mine["deaths"])
                         save_matches()
-                continue
+                    continue
             mode, score, feed = read_hud(jpg, game)
             with lock:
                 m = cur_match()
@@ -801,7 +856,7 @@ def stats():
 
         def brief(x):
             return {k: x.get(k) for k in ("id", "game", "game_name", "mode", "kills", "deaths", "score",
-                                          "victims", "killed_by", "deaths_detail", "started", "ended")} | {
+                                          "victims", "killed_by", "deaths_detail", "map", "started", "ended")} | {
                 "rounds": {"won": sum(r["result"] == "win" for r in x.get("rounds", [])),
                            "lost": sum(r["result"] == "loss" for r in x.get("rounds", []))},
                 "feed": [f"{e['killer']} > {e['victim']}" + (f" ({e['weapon']})" if e.get("weapon") else "")

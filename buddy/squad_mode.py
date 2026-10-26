@@ -444,6 +444,10 @@ class SquadMode:
             asked = next((t for _, who, t, _ in reversed(self.lines) if not who.startswith("Hasaan")), "")
             if reason in ("addressed", "question") and local_backend.RECAP_Q.search(asked):
                 msgs.insert(1, {"role": "system", "content": await self.b.scene_recap()})   # "what happened?"
+            if reason in ("addressed", "question") and local_backend.STATS_Q.search(asked):
+                note = await self.b.scene_stats()                                        # "how many kills?"
+                if note:
+                    msgs.insert(1, {"role": "system", "content": note})
             r = await self.client.post(self.base + "/chat/completions", json={
                 "model": self.p["llm"], "messages": msgs, "max_tokens": 80,
                 "temperature": float(self.p.get("temperature", 0.9)),

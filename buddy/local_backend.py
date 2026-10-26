@@ -73,6 +73,11 @@ EXPLICIT = re.compile(
     r"us(?:e|ing)\s+(?:the\s+|your\s+)?(?:app|crcmz|data|tools?)|"
     r"look\s+through|dig\s+(?:up|through|into))\b", re.I)
 ROAST_Q = re.compile(r"\broast", re.I)
+# "how many kills do I have" & co: the match data the scene watcher reads off the HUD
+STATS_Q = re.compile(
+    r"\b(kills?|deaths?|died|k\s?/?\s?d|score(?:board)?|who (?:killed|got|dropped) me|killed me|how many|"
+    r"how(?:'?m| am) i doing|how'?s my (?:game|match)|my stats|stats|kill ?feed|what round|winning|losing|"
+    r"my record|last (?:match|game|round)|today)\b", re.I)
 # "what happened?" & co: look back over the last ~15 s of the PS5 screen before answering
 RECAP_Q = re.compile(
     r"\b(what\s+(?:just\s+)?happened|what\s+(?:am\s+i|was\s+i|is\s+he|was\s+he)\s+doing|what\s+was\s+that|"
@@ -413,10 +418,11 @@ def _wav_to_pcm24k(data):
 
 class LocalSession:
     def __init__(self, cfg, profile, history, on_stage, mcp=None, tools=None, on_tool=None, may_write=None,
-                 tool_hint="", context_fn=None, recap_fn=None, on_recap=None, game_fn=None):
+                 tool_hint="", context_fn=None, recap_fn=None, on_recap=None, game_fn=None, stats_fn=None):
         self.cfg, self.p = cfg, profile
         self.loadouts = loadout.Loadouts()  # "what's the meta class?" -> wzmeta API, read out as-is
         self.game_fn = game_fn            # the game on the PS5 screen right now (scene watcher), or ""
+        self.stats_fn = stats_fn          # this match / today, read off the HUD (scene watcher /stats)
         self.recap_fn = recap_fn          # last ~15 s of the PS5 screen, described (scene watcher)
         self.on_recap = on_recap          # buddy plays a pre-rendered "lemme run that back"
         self.context_fn = context_fn      # squad mode: what was just said in the party
@@ -820,6 +826,10 @@ class LocalSession:
         known = self._known_facts(text) if (roast or ROAST_Q.search(text)) and not lookup else None
         if known:
             msgs.insert(-1, {"role": "system", "content": known})
+        if not roast and not lookup and self.stats_fn and STATS_Q.search(text):
+            note = await self.stats_fn()
+            if note:
+                msgs.insert(-1, {"role": "system", "content": note})
         if not roast and self.recap_fn and RECAP_Q.search(text):
             if self.on_recap:
                 self.on_recap()                      # covers the ~3.5 s look back

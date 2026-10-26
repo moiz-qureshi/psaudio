@@ -687,6 +687,45 @@ class Buddy:
                 "to what you saw. Don't invent anything that isn't in what you saw, and don't describe "
                 "the frames like a commentator.)")
 
+    async def scene_stats(self):
+        """This match + today's totals from the scene watcher (kill feed / HUD / kill cams), as a
+        prompt note. Instant: it's already been read off the screen."""
+        import httpx
+        url = self.cfg["squad"].get("scene_url", "").rstrip("/")
+        if not url or not self.cfg.get("ps5_stream_token"):
+            return None
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(2, connect=0.5)) as c:
+                d = (await c.get(url + "/stats", headers={"Authorization": f"Bearer {self.cfg['ps5_stream_token']}"})).json()
+        except Exception as e:
+            log.warning("match stats unavailable: %s %s", type(e).__name__, e)
+            return None
+        m, lines = d.get("match"), []
+        if m:
+            mode = f" ({m['mode'].title()})" if m.get("mode") else ""
+            lines.append(f"This match: {m.get('game_name') or m.get('game')}{mode}"
+                         + (f", score {m['score']} (top number first, as on his HUD)" if m.get("score") else ""))
+            lines.append(f"His kills: {m.get('kills', 0)}" + (f" ({', '.join(m['victims'][-8:])})" if m.get("victims") else ""))
+            dd = m.get("deaths_detail") or []
+            how = [f"{x['by']}" + (f" with {x['weapon']}" if x.get("weapon") else "") for x in dd[-5:] if x.get("by")]
+            lines.append(f"His deaths: {m.get('deaths', 0)}" + (f", killed by {', '.join(how or m.get('killed_by', [])[-5:])}"
+                                                                 if (how or m.get("killed_by")) else ""))
+            if m.get("feed"):
+                lines.append("Recent kill feed: " + "; ".join(m["feed"][-6:]))
+            sb = m.get("scoreboard") or {}
+            mine = next((r for r in sb.get("rows", []) if r.get("me")), None)
+            if mine:
+                lines.append(f"Last scoreboard: {mine.get('kills')} kills, {mine.get('deaths')} deaths, score {mine.get('score')}"
+                             + (f", teams {sb['teams']}" if sb.get("teams") else ""))
+        for g, t in (d.get("today") or {}).items():
+            lines.append(f"Today in {g}: {t['matches']} matches, {t['kills']} kills, {t['deaths']} deaths")
+        if not lines:
+            return ("(Match data from his screen: nothing read yet"
+                    + ("" if d.get("live") else ", the stream isn't on") + ". Say you haven't caught it yet.)")
+        return ("(Live match data read off his PS5 screen (kill feed, HUD, kill cams; it can miss a few):\n"
+                + "\n".join(lines) + "\nAnswer from this, talking to him as 'you'. Don't invent numbers that "
+                "aren't here. Hype good games, roast bad ones.)")
+
     def busy_for_gpu(self):
         sq = getattr(self, "squad_mode", None)
         return self.state in ("listening", "thinking", "speaking") or bool(sq and sq.speaking)
@@ -1138,7 +1177,8 @@ class Buddy:
                                               recap_fn=self.scene_recap,
                                               on_recap=lambda: self.play_filler(self.RECAP_FILLERS),
                                               game_fn=lambda: str(((self.squad_mode.scene or {}).get("now")
-                                                                   or {}).get("game") or ""))
+                                                                   or {}).get("game") or ""),
+                                              stats_fn=self.scene_stats)
         return client.aio.live.connect(model=p["model"], config=self.live_config())
 
     async def _session_loop(self):

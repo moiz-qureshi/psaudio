@@ -1024,10 +1024,10 @@ class Buddy:
         p = self.profile
         if p["kind"] == "local":
             hint = self.tool_hints()
-            return local_backend.LocalSession(dict(self.cfg, system_instruction=self.personality() + hint),
+            return local_backend.LocalSession(dict(self.cfg, system_instruction=self.personality()),
                                               p, self.local_history, self._stage,
                                               mcp=self.mcp if self.live_tools else None, tools=self.live_tools,
-                                              on_tool=self.play_filler, may_write=self.may_write)
+                                              on_tool=self.play_filler, may_write=self.may_write, tool_hint=hint)
         return client.aio.live.connect(model=p["model"], config=self.live_config())
 
     async def _session_loop(self):

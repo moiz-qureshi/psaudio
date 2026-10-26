@@ -61,6 +61,16 @@ LOOKUP_HINT = re.compile(
     r"leaderboard|rank|top|worst|best|trip|flight|land|stay|airbnb|owe|split|paid|pack|poll|"
     r"weather|food|eat|buds?|tourn\w*|clip|played|playing|online|last (night|week)|this week|"
     r"today|yesterday|said|messag\w*|whatsapp|group|memory|remember)\b", re.I)
+# crcmz lookups happen only when asked for: everything else is plain chat (no tool
+# instructions, no schemas, no prefetch), which is what keeps banter at ~1 s to first word
+EXPLICIT = re.compile(
+    r"\b(look(?:ing)?\s+(?:it|that|this|them|him|her|\w+)?\s*up|look\s+(?:in|into|at)\s+(?:the\s+)?(?:app|crcmz|data|stats)|"
+    r"check\s+(?:the\s+|your\s+)?(?:app|crcmz|stats?|data|leaderboard|records?|tools?|whatsapp|chat|trip)|"
+    r"use\s+(?:your\s+|the\s+)?(?:tools?|app|data|mcp)|pull\s+(?:it\s+|that\s+|up|\w+\s+up)|"
+    r"search|crcmz|in\s+the\s+app|from\s+the\s+app|find\s+out|look\s+through|dig\s+(?:up|through|into))\b", re.I)
+BANTER_HINT = (" Right now you are just talking: you can't look anything up this turn. Never make "
+               "up stats, numbers, scores, dates or results. If someone wants real stats or squad "
+               "history, tell them to ask you to look it up.")
 TOOL_MARKUP = re.compile(r"<\s*/?\s*(tool_?call|function|parameter)", re.I)
 PROMISE = re.compile(r"\b(let me|i'?ll|i will|gonna|one sec|hold on|give me a sec)\b[^.?!]{0,40}"
                      r"\b(look|check|pull|find|try|dig|see)\b[^.?!]*[.?!]?\s*$", re.I)
@@ -343,8 +353,10 @@ def _wav_to_pcm24k(data):
 
 
 class LocalSession:
-    def __init__(self, cfg, profile, history, on_stage, mcp=None, tools=None, on_tool=None, may_write=None):
+    def __init__(self, cfg, profile, history, on_stage, mcp=None, tools=None, on_tool=None, may_write=None,
+                 tool_hint=""):
         self.cfg, self.p = cfg, profile
+        self.tool_hint = tool_hint        # tool instructions: added to the prompt on lookup turns only
         self.on_tool = on_tool            # buddy plays a pre-rendered "let me look that up"
         self.turn_mode = {}               # set by the buddy at the end of each question (ROAST key)
         self.may_write = may_write or (lambda name: True)   # writes only for allowed voices
@@ -554,8 +566,8 @@ class LocalSession:
                 t.cancel()
         await self.client.aclose()
 
-    def _messages(self, text):
-        system = self.cfg["system_instruction"] + (
+    def _messages(self, text, lookup=False):
+        system = self.cfg["system_instruction"] + (self.tool_hint if lookup else BANTER_HINT) + (
             " Reply in plain spoken English: no markdown, lists, emojis or stage directions.")
         if self.p.get("extra_instruction"):
             system += " " + self.p["extra_instruction"]
@@ -654,14 +666,18 @@ class LocalSession:
         await self.out.put(_msg(input_transcription=NS(text=text)))
 
         roast = self.turn_mode.get("mode") == "roast"
-        people_ctx = None if roast else await self._people_lookup(text)
+        lookup = bool(self.mcp) and not roast and bool(EXPLICIT.search(text) or PERSON_Q.search(text))
+        if lookup and self.on_tool:
+            self.on_tool()                          # "hold up, checking" right away, not after routing
+        self.on_stage("lookup_turn_ms" if lookup else "chat_turn_ms")
+        people_ctx = await self._people_lookup(text) if lookup else None
         if roast:
             # ROAST key: one savage roast of a random player, no lookups, no history
             msgs = [{"role": "system", "content": self.cfg["system_instruction"].split(" You can look things up")[0]
                      + " " + self.turn_mode.get("directive", "")},
                     {"role": "user", "content": text}]
         else:
-            msgs = self._messages(text)
+            msgs = self._messages(text, lookup)
             if people_ctx:
                 msgs.insert(-1, {"role": "system", "content": people_ctx})
 
@@ -669,10 +685,11 @@ class LocalSession:
         speaker = asyncio.create_task(self._speak(sentences))
         reply = ""
         try:
-            filled = False
             self.turn_tools = []                       # tool schemas cost ~1.2k prompt tokens: only when needed
-            if self.tools and self.mcp and not roast:
+            filled = lookup                            # the "checking" line already played
+            if lookup and self.tools:
                 self.active_tools, likely = await self._route(text)
+                likely = True                          # they asked for it
                 self.on_stage("routed_ms")
                 if self.prefetch:
                     got = await asyncio.gather(*(self.mcp.call(t["name"], {}) for t in self.prefetch),
@@ -688,9 +705,6 @@ class LocalSession:
                 # data already in hand -> answer from it; a data question -> offer the routed
                 # tools; banter -> no tools at all (the smallest, fastest prompt)
                 self.turn_tools = [] if fetched else (self.active_tools if likely else [])
-                if likely and self.on_tool:            # say "let me look that up" now, not after
-                    self.on_tool()                     # the model has spent seconds deciding
-                    filled = True
             used_tools = False
             rounds = 1 if roast else 2                 # up to 2 rounds of crcmz lookups...
             answered, seen = False, set()
@@ -705,11 +719,11 @@ class LocalSession:
                 text_out, calls = await self._stream_llm(msgs, sentences, first_reply=not reply,
                                                          roast=roast, tools_on=not last)
                 reply = (reply + " " + text_out).strip() if text_out else reply
-                if not calls and not last and self.mcp and text_out and PROMISE.search(text_out) and not self.turn_tools:
+                if not calls and not last and lookup and self.mcp and text_out and PROMISE.search(text_out) and not self.turn_tools:
                     self.turn_tools = self.active_tools or self.tools   # it wants to look: give it the tools
                     msgs.append({"role": "assistant", "content": text_out})
                     continue
-                if not calls and not last and self.mcp and text_out and PROMISE.search(text_out):
+                if not calls and not last and lookup and self.mcp and text_out and PROMISE.search(text_out):
                     # it promised to look something up but didn't: make it follow through
                     msgs.append({"role": "assistant", "content": text_out})
                     msgs.append({"role": "user", "content": "(You said you'd look it up. Call the tool now, "

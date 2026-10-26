@@ -17,8 +17,9 @@ def state(ai, vol):
         model = "squad asked"
     reply = (ai.get("reply") or "").strip() or (ai.get("question") and f"“{ai['question']}”") or "Say “Hey Hasaan”…"
     v = {"vol": vol, "st": st, "model": model, "session": bool(ai.get("session_on")), "error": ai.get("error"),
+         "squad": ai.get("squad_on"), "squad_video": ai.get("squad_video"),
          "mic": ai.get("mic_muted"), "hv": ai.get("headset_volume"), "hm": ai.get("headset_muted"), "reply": reply}
-    sigs = [json.dumps(v["vol"]), json.dumps([st, model, v["session"], v["error"]]),
+    sigs = [json.dumps(v["vol"]), json.dumps([st, model, v["session"], v["error"], v["squad"], v["squad_video"]]),
             json.dumps([v["mic"], v["hv"], v["hm"]]), json.dumps(reply)]
     return v, sigs
 
@@ -40,8 +41,11 @@ def draw_panel(i, v):
         s.panel(0, "HASAAN", "cyan", "tap: next model", active=v["st"] != "offline", glyph="bot")
         s.big(0, label, col, y=28, size=30)
         s.small(0, v["model"] or "-", 64, u.TEXT, 13, 600)
-        s.small(0, (v["error"] or ("session on" if v["session"] else "session off"))[:30], 81,
-                u.ACCENT["red"] if v["error"] else u.DIM, 11, 500)
+        sub = v["error"] or ("squad mode · watching" if v["squad"] and v["squad_video"] else
+                             "squad mode · listening" if v["squad"] else
+                             "session on" if v["session"] else "session off")
+        s.small(0, sub[:30], 81, u.ACCENT["red"] if v["error"] else
+                u.ACCENT["violet"] if v["squad"] else u.DIM, 11, 600 if v["squad"] else 500)
     elif i == 2:                                 # mic -> PS5 + headset volume (knob 2)
         mic = v["mic"]
         word, mc = ("MUTED", "red") if mic else ("LIVE", "green") if mic is False else ("?", "slate")

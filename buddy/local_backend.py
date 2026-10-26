@@ -354,8 +354,9 @@ def _wav_to_pcm24k(data):
 
 class LocalSession:
     def __init__(self, cfg, profile, history, on_stage, mcp=None, tools=None, on_tool=None, may_write=None,
-                 tool_hint=""):
+                 tool_hint="", context_fn=None):
         self.cfg, self.p = cfg, profile
+        self.context_fn = context_fn      # squad mode: what was just said in the party
         self.tool_hint = tool_hint        # tool instructions: added to the prompt on lookup turns only
         self.on_tool = on_tool            # buddy plays a pre-rendered "let me look that up"
         self.turn_mode = {}               # set by the buddy at the end of each question (ROAST key)
@@ -572,6 +573,9 @@ class LocalSession:
         if self.p.get("extra_instruction"):
             system += " " + self.p["extra_instruction"]
         msgs = [{"role": "system", "content": system}]
+        party = self.context_fn() if self.context_fn else ""
+        if party:
+            msgs.append({"role": "system", "content": party})
         for u, a in list(self.history)[-int(self.p.get("history_turns", 4)):]:
             msgs += [{"role": "user", "content": u}, {"role": "assistant", "content": a}]
         if text is not None:
@@ -909,39 +913,45 @@ class LocalSession:
         return _wav_to_pcm24k(r.content)
 
     async def _tts_stream(self, text):
-        """oMLX streams one WAV header then raw PCM as it is generated; pass the
-        audio on as it arrives instead of waiting for the whole phrase."""
-        body = {"model": self.p["tts_model"], "input": text, "voice": self.p.get("tts_voice") or None,
-                "response_format": "wav", "stream": True, "max_tokens": tts_token_cap(text)}
-        ref = voice_ref(self.p.get("ref_voice", "")) if "tts" in self.p["tts_model"].lower() and \
-            "kokoro" not in self.p["tts_model"].lower() else None
-        if ref:
-            body["ref_audio"], body["ref_text"] = ref
-            body.pop("voice")
-        elif "base" in self.p["tts_model"].lower() and "kokoro" not in self.p["tts_model"].lower():
-            # a voice-cloning model with no recording yet: speak with Kokoro instead of failing
-            body.update(model=LOCAL_DEFAULTS["tts_model"], voice=LOCAL_DEFAULTS["tts_voice"])
-        async with self.client.stream("POST", self.base + "/audio/speech", json=body) as r:
-            r.raise_for_status()
-            head, rate, odd = b"", None, b""
-            async for chunk in r.aiter_bytes():
-                if rate is None:              # parse the header once (fmt rate, start of data)
-                    head += chunk
-                    i = head.find(b"data")
-                    if i < 0 or len(head) < i + 8:
-                        continue
-                    f = head.find(b"fmt ")
-                    rate = int.from_bytes(head[f + 12:f + 16], "little") if f >= 0 else OUT_RATE
-                    chunk, head = head[i + 8:], b""
-                chunk = odd + chunk
-                if len(chunk) % 2:
-                    chunk, odd = chunk[:-1], chunk[-1:]
-                else:
-                    odd = b""
-                if not chunk:
+        async for chunk in tts_stream(self.client, self.base, self.p, text):
+            yield chunk
+
+
+async def tts_stream(client, base, p, text):
+    """oMLX streams one WAV header then raw PCM as it is generated; pass the audio on
+    (24 kHz s16le mono) as it arrives instead of waiting for the whole phrase. Used by
+    the chat turns and by squad mode, so both speak in the profile's voice."""
+    body = {"model": p["tts_model"], "input": text, "voice": p.get("tts_voice") or None,
+            "response_format": "wav", "stream": True, "max_tokens": tts_token_cap(text)}
+    ref = voice_ref(p.get("ref_voice", "")) if "tts" in p["tts_model"].lower() and \
+        "kokoro" not in p["tts_model"].lower() else None
+    if ref:
+        body["ref_audio"], body["ref_text"] = ref
+        body.pop("voice")
+    elif "base" in p["tts_model"].lower() and "kokoro" not in p["tts_model"].lower():
+        # a voice-cloning model with no recording yet: speak with Kokoro instead of failing
+        body.update(model=LOCAL_DEFAULTS["tts_model"], voice=LOCAL_DEFAULTS["tts_voice"])
+    async with client.stream("POST", base + "/audio/speech", json=body) as r:
+        r.raise_for_status()
+        head, rate, odd = b"", None, b""
+        async for chunk in r.aiter_bytes():
+            if rate is None:              # parse the header once (fmt rate, start of data)
+                head += chunk
+                i = head.find(b"data")
+                if i < 0 or len(head) < i + 8:
                     continue
-                if rate != OUT_RATE:
-                    x = np.frombuffer(chunk, dtype="<i2").astype(np.float32)
-                    t = np.arange(0, len(x) * OUT_RATE / rate) * rate / OUT_RATE
-                    chunk = np.interp(t, np.arange(len(x)), x).astype("<i2").tobytes()
-                yield chunk
+                f = head.find(b"fmt ")
+                rate = int.from_bytes(head[f + 12:f + 16], "little") if f >= 0 else OUT_RATE
+                chunk, head = head[i + 8:], b""
+            chunk = odd + chunk
+            if len(chunk) % 2:
+                chunk, odd = chunk[:-1], chunk[-1:]
+            else:
+                odd = b""
+            if not chunk:
+                continue
+            if rate != OUT_RATE:
+                x = np.frombuffer(chunk, dtype="<i2").astype(np.float32)
+                t = np.arange(0, len(x) * OUT_RATE / rate) * rate / OUT_RATE
+                chunk = np.interp(t, np.arange(len(x)), x).astype("<i2").tobytes()
+            yield chunk

@@ -32,6 +32,12 @@ ICONS = {
     "airoast_listening":  ("ROAST", "SAY NAME", "mic", "red", True, "red"),
     "airoast_thinking":   ("ROAST", "COOKING", "flame", "amber", True, "amber"),
     "airoast_speaking":   ("ROAST", "ROASTING", "bars", "orange", True, "orange"),
+    # squad mode: always listening + watching (state: aisquad)
+    "aisquad":            ("SQUAD", "JOIN", "squad", "slate", False, None),
+    "aisquad_off":        ("SQUAD", "JOIN", "squad", "slate", False, None),
+    "aisquad_on":         ("SQUAD", "LISTENING", "squad", "violet", True, "violet"),
+    "aisquad_watching":   ("SQUAD", "WATCHING", "eye", "violet", True, "green"),
+    "aisquad_talking":    ("SQUAD", "TALKING", "bars", "green", True, "green"),
     # plain action keys
     "ui_studio":          ("LIGHT", "STUDIO", "bulb", "amber", True, None),
     "ui_hdmi":            ("TV INPUT", "HDMI", "hdmi", "violet", True, None),

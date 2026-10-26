@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Mirror psaudio-buddy's state onto the deck: long-polls the Pi and swaps the
-icons of keys tagged `state: aibuddy` / `state: aisession` / `state: aivol`
+icons of keys tagged `state: aibuddy` / `state: aisession` / `state: aisquad` / `state: airoast`
 through ragnarosd-plus's `keystate` verb. Errors also show as a strip toast."""
 import json
 import os
@@ -46,7 +46,8 @@ def snapshot(st):
             "reply": (st.get("reply") or "")[-400:], "ai_volume": st.get("ai_volume"),
             "listening_source": st.get("listening_source"),
             "game_volume": st.get("game_volume"), "game_muted": st.get("game_muted"),
-            "headset_volume": st.get("headset_volume"), "headset_muted": st.get("headset_muted")}
+            "headset_volume": st.get("headset_volume"), "headset_muted": st.get("headset_muted"),
+            "squad_on": (st.get("squad") or {}).get("on"), "squad_video": (st.get("squad") or {}).get("video")}
     tmp = LIVE + ".tmp"
     try:
         with open(tmp, "w") as f:
@@ -60,6 +61,7 @@ def main():
     e = env()
     url, token = e["BUDDY_URL"], e["BUDDY_TOKEN"]
     seq, last, last_err, last_session, last_crcmz, pushed = -1, None, None, None, None, time.time()
+    last_squad = None
     while True:
         try:
             req = urllib.request.Request(f"{url}/status?since={seq}&wait=25",
@@ -70,7 +72,7 @@ def main():
             snapshot(st)
             roast_turn = st.get("turn_mode") == "roast"
             if time.time() - pushed > 30:           # backstop: the deck daemon may have restarted
-                last, last_session, pushed = None, None, time.time()
+                last, last_session, last_squad, pushed = None, None, None, time.time()
             if (state, roast_turn) != last:
                 ctl("keystate", "aibuddy", state)
                 # the ROAST key lights up only while a roast is being taken / spoken
@@ -80,6 +82,12 @@ def main():
             if session != last_session:
                 ctl("keystate", "aisession", session)    # state shows on the key + live strip, no toast
                 last_session = session
+            sq = st.get("squad") or {}
+            squad = ("off" if not sq.get("on") else "talking" if sq.get("speaking")
+                     else "watching" if sq.get("video") else "on")
+            if squad != last_squad:
+                ctl("keystate", "aisquad", squad)        # SQUAD key: off / on (listening) / watching / talking
+                last_squad = squad
             # toasts only for problems worth interrupting the strip for; everything
             # else (state, model, session, volume, who asked) is on the live strip
             if state == "error" and st.get("error") != last_err:
@@ -93,6 +101,8 @@ def main():
             snapshot({"state": "offline"})
             if last != "offline":
                 ctl("keystate", "aibuddy", "offline")
+                ctl("keystate", "aisquad", "off")
+                last_squad = None
                 last = "offline"
             seq = -1
             time.sleep(3)

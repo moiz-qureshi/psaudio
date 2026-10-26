@@ -228,7 +228,21 @@ def g_globe(d, c, cx, cy, s):
     d.line((cx - s * 0.45, cy, cx + s * 0.45, cy), fill=c, width=w)
 
 
-GLYPHS = {"box": g_box, "pi": g_pi, "home": g_home, "laptop": g_laptop, "cloud": g_cloud, "globe": g_globe,
+def g_squad(d, c, cx, cy, s):            # three heads + shoulders
+    for dx, r, y in ((-0.34, 0.12, 0.02), (0.34, 0.12, 0.02), (0.0, 0.16, -0.08)):
+        d.ellipse((cx + (dx - r) * s, cy + (y - 0.3 - r) * s, cx + (dx + r) * s, cy + (y - 0.3 + r) * s), fill=c)
+        w = r * 2.1
+        d.pieslice((cx + (dx - w) * s, cy + (y - 0.08) * s, cx + (dx + w) * s, cy + (y + 0.5 + r) * s), 180, 360, fill=c)
+
+
+def g_eye(d, c, cx, cy, s):
+    w, r, off = int(s * 0.08), s * 0.72, s * 0.42   # two lid arcs from circles above/below
+    d.arc((cx - r, cy + off - r, cx + r, cy + off + r), 216, 324, fill=c, width=w)
+    d.arc((cx - r, cy - off - r, cx + r, cy - off + r), 36, 144, fill=c, width=w)
+    d.ellipse((cx - s * 0.17, cy - s * 0.17, cx + s * 0.17, cy + s * 0.17), fill=c)
+
+
+GLYPHS = {"squad": g_squad, "eye": g_eye, "box": g_box, "pi": g_pi, "home": g_home, "laptop": g_laptop, "cloud": g_cloud, "globe": g_globe,
           "bot": g_bot, "mic": g_mic, "bars": g_bars, "dots": g_dots, "alert": g_alert, "unlink": g_unlink,
           "stop": g_stop, "power": g_power, "flame": g_flame, "bulb": g_bulb, "hdmi": g_hdmi, "speaker": g_speaker}
 

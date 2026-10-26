@@ -51,6 +51,7 @@ log = logging.getLogger("buddy")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import local_backend  # noqa: E402
 import mcp_client  # noqa: E402
+import squad_mode  # noqa: E402
 
 CONFIG_PATH = pathlib.Path(os.environ.get(
     "BUDDY_CONFIG", "~/.config/psaudio-buddy/buddy.toml")).expanduser()
@@ -97,6 +98,15 @@ DEFAULTS = {
         "squad_holdoff_s": 1.5,       # squad wake ignored while / just after the AI speaks
         "chime": True,
         "session_off_after_s": 7200,  # AI SESSION switches itself off after this long unused
+    },
+    "squad": {                    # SQUAD key: always-on party member (squad_mode.py), all local
+        "frame_url": "http://192.168.4.38:8898",   # PS5 Stream app on the MacBook
+        "vision_model": "Qwen3-VL-8B-Instruct-MLX-4bit",
+        "look_every_s": 1.5,      # check the picture this often (described only when it changed)
+        "quiet_s": 4.0,           # chime in only after this much quiet
+        "cooldown_s": 20,         # at least this long between lines nobody asked for
+        "idle_comment_s": 240,    # a dead-quiet party gets a line about this often
+        "context_s": 180,         # how much of the party chat it keeps in mind
     },
     "limits": {
         "max_turns_per_day": 300,
@@ -163,6 +173,7 @@ def load_config():
     cfg["omlx_key"] = os.environ.get("OMLX_API_KEY", "").strip()
     cfg["mac_voice_token"] = os.environ.get("MAC_VOICE_TOKEN", "").strip()
     cfg["crcmz_token"] = os.environ.get("CRCMZ_MCP_TOKEN", "").strip()
+    cfg["ps5_stream_token"] = os.environ.get("PS5_STREAM_TOKEN", "").strip()
     return cfg
 
 
@@ -618,6 +629,7 @@ class Buddy:
         self.mic_is_muted = None
         self.game = {"volume": None, "muted": None}   # PS5 game audio -> headset (loopback stream)
         self.headset = {"volume": None, "muted": None}  # the A50 X sink: everything you hear
+        self.squad_mode = squad_mode.SquadMode(self)     # SQUAD key: always-on party member
 
     # -- state -------------------------------------------------------------
     async def set_state(self, state, error=None):
@@ -657,6 +669,7 @@ class Buddy:
             "game_volume": self.game["volume"], "game_muted": self.game["muted"],
             "headset_volume": self.headset["volume"], "headset_muted": self.headset["muted"],
             "question": self.question, "reply": self.reply,
+            "squad": self.squad_mode.status(),
             "last_turn": self.history[-1] if self.history else None,
             "turns_measured": len(lat),
             "usage": {"day": u["day"], "turns": u["turns"], "audio_in_s": u["audio_in_s"],
@@ -996,6 +1009,7 @@ class Buddy:
             await self.set_state("ready" if self.session_on else "off")
 
     async def disarm(self, why="disarmed"):
+        await self.squad_mode.stop()
         self.session_on = False
         for name, d in self.detectors.items():
             mic = self.mic if name == "mic" else self.squad
@@ -1027,7 +1041,8 @@ class Buddy:
             return local_backend.LocalSession(dict(self.cfg, system_instruction=self.personality()),
                                               p, self.local_history, self._stage,
                                               mcp=self.mcp if self.live_tools else None, tools=self.live_tools,
-                                              on_tool=self.play_filler, may_write=self.may_write, tool_hint=hint)
+                                              on_tool=self.play_filler, may_write=self.may_write, tool_hint=hint,
+                                              context_fn=self.squad_mode.recent_chat)
         return client.aio.live.connect(model=p["model"], config=self.live_config())
 
     async def _session_loop(self):
@@ -1387,6 +1402,7 @@ class Buddy:
     async def stop(self):
         self.last_use = time.monotonic()
         await self._end_listen(submit=False)
+        self.squad_mode.cut()
         self.player.stop()
         self.interrupt()
         if self.state in ("listening", "thinking", "speaking"):
@@ -1625,6 +1641,12 @@ def make_app(b: Buddy):
     async def toggle(r):
         await (b.disarm() if b.session_on else b.session_start()); return await ok()
 
+    async def squad(r):
+        want = r.query.get("set", "toggle")
+        on = (not b.squad_mode.on) if want == "toggle" else want == "on"
+        await (b.squad_mode.start() if on else b.squad_mode.stop())
+        return web.json_response({"ok": True, **b.squad_mode.status()})
+
     async def volume(r):
         q = r.query
         v = int(cfg["ai_volume"])
@@ -1662,6 +1684,19 @@ def make_app(b: Buddy):
         secs = await b.feed_file(p, mode="roast" if body.get("mode") == "roast" else "")
         b._test_source = None
         return web.json_response({"ok": True, "fed_s": secs, **b.status()})
+
+    async def test_squad(r):
+        """Test hook: inject a party line (who = Moiz | Squad), as if Whisper heard it."""
+        body = await r.json()
+        sm = b.squad_mode
+        if not sm.on:
+            return web.json_response({"ok": False, "error": "squad mode is off"}, status=400)
+        sm.lines.append((time.monotonic(), body.get("who", "Squad"), body["text"], False))
+        if body.get("static_s") is not None:
+            sm.static_s = int(body["static_s"])
+            sm.last_moiz = time.monotonic() - float(body.get("moiz_quiet_s", 0))
+        sm._trigger(body.get("reason") or ("addressed" if squad_mode.NAME_RE.search(body["text"]) else "talk"))
+        return web.json_response({"ok": True})
 
     async def profiles_get(r):
         return web.json_response({"ok": True, "active": b.profile["id"], "profiles": b.profiles.list()})
@@ -2019,7 +2054,7 @@ def make_app(b: Buddy):
         web.post("/press", press), web.post("/release", release),
         web.post("/talk/start", talk_start), web.post("/talk/end", talk_end),
         web.post("/stop", stop), web.post("/arm", arm), web.post("/disarm", disarm),
-        web.post("/toggle", toggle), web.post("/volume", volume),
+        web.post("/toggle", toggle), web.post("/volume", volume), web.post("/squad", squad), web.post("/test/squad", test_squad),
         web.get("/status", status), web.get("/history", history),
         web.post("/test/feed", test_feed), web.get("/health", health),
         web.get("/profiles", profiles_get), web.put("/profiles/{pid}", profile_put),

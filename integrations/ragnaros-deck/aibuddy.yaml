@@ -42,6 +42,14 @@ actions:
       release: /home/opti3/.config/ragnaros/bin/aibuddy release
       state: airoast
       pinned: true
+  - id: squad
+    name: Squad mode (always on)
+    emoji: 👥
+    description: Hasaan joins the party - always listening, watching the PS5 stream, talks when it fits. Press again to leave.
+    for: [key, touch, press]
+    icon: icons/aisquad_off.png
+    command: /home/opti3/.config/ragnaros/bin/aibuddy squad
+
   - id: stop
     name: AI STOP
     emoji: ⏹️

@@ -5,6 +5,7 @@
 #   aibuddy headset up|down [N] | mute | <pct>   A50 X overall volume (game + soundboard + Hasaan)
 #   aibuddy game up|down [N] | mute | <pct>      PS5 game audio only
 #   aibuddy model next | <profile-id>    switch the AI model profile (managed on Deck Manager's AI page)
+#   aibuddy squad [toggle|on|off]        squad mode: Hasaan always listening + watching the PS5 stream
 # Token: ~/.config/ragnaros/secrets/aibuddy.env (BUDDY_URL, BUDDY_TOKEN), mode 600.
 set -u
 . "$HOME/.config/ragnaros/secrets/aibuddy.env"
@@ -21,6 +22,8 @@ case "${1:-status}" in
   model) [[ "${2:-next}" =~ ^[a-z0-9][a-z0-9_-]{0,31}$ ]] || { echo "bad profile id" >&2; exit 2; }
          call "/profiles/${2:-next}/use" 15 ;;
   mic) call "/mic?set=${2:-toggle}" ;;
+  squad) [[ "${2:-toggle}" =~ ^(toggle|on|off)$ ]] || { echo "squad toggle|on|off" >&2; exit 2; }
+         call "/squad?set=${2:-toggle}" 15 ;;
   headset) case "${2:-}" in              # A50 X overall volume on the Pi (knob 2)
           up) call "/headset?up=${3:-5}" ;;
           down) call "/headset?down=${3:-5}" ;;
@@ -34,5 +37,5 @@ case "${1:-status}" in
           *) call "/game?set=${2:-100}" ;;
         esac ;;   # toggle on the Pi itself, so a quick double tap can't repeat
   status) curl -s -m 3 -H "Authorization: Bearer $BUDDY_TOKEN" "$BUDDY_URL/status" ;;
-  *) echo "usage: aibuddy press|release|stop|toggle|arm|disarm|vol up|down [N]|mic|model next|<id>|status" >&2; exit 2 ;;
+  *) echo "usage: aibuddy press|release|stop|toggle|arm|disarm|vol up|down [N]|mic|model next|<id>|squad|status" >&2; exit 2 ;;
 esac

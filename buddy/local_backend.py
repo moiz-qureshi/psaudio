@@ -662,10 +662,14 @@ class LocalSession:
 
     async def _loadout_turn(self, text):
         """Class questions and the slow read-out answer here; True if it did."""
-        said = self.loadouts.follow(text) if self.loadouts.active else None
+        # sends go straight through crcmz (fixed text: just the class), for a friend's answer too
+        send = self.mcp.call if self.mcp else None
+        said = await self.loadouts.follow(text, self.turn_mode.get("source") or "mic", send,
+                                          self.cfg.get("squad_gamertags") or [],
+                                          self.cfg.get("owner_gamertag") or "") if self.loadouts.active else None
         if said is None:
             try:
-                got = await self.loadouts.answer(text, self.game_fn() if self.game_fn else "")
+                got = await self.loadouts.answer(text, self.game_fn() if self.game_fn else "", can_send=bool(send))
             except Exception as e:
                 log.warning("wzmeta lookup failed: %s %s", type(e).__name__, e)
                 got = ("Couldn't reach the meta site right now.", []) if loadout.CLASS_Q.search(text) else None

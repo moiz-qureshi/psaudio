@@ -4,6 +4,8 @@
                                               attachment, then "Want me to go through it slow?"
   "yes"                                    -> "Primary, the VOYAK KT-3. Got it?"
   "next" / "got it" / "ok"                 -> the next piece        ("repeat", "back", "stop" work too)
+  "send it to my WhatsApp" / "PSN"         -> the class as text, through crcmz (WhatsApp DM or group,
+                                              PSN squad group - crcmz has no PSN DM)
 
 Answers are built here, not by the model: names have to be exact and it is faster.
 API: https://wzmeta.interestingsoup.com/api (games mw4, warzone, bo6, bo7).
@@ -29,13 +31,16 @@ CATEGORY = [(r"\bsnipers?\b", "sniper"), (r"close[- ]range|\bsmgs?\b|shotguns?",
 WEAPON_Q = re.compile(r"\b(?:class|build|load ?out|attachments?|setup)\s+(?:for|on)\s+(?:the|my|a)?\s*"
                       r"(?P<w>[\w.\- ]{2,30}?)\s*(?:in\b|for\b|on\b|[?.!,]|$)", re.I)
 
-YES = re.compile(r"^\W*(yes|yeah|yep|yup|ya|sure|ok(?:ay)?|please|go|do it|go ahead|bet|alright|"
-                 r"slow(?:er)?|one by one)\b", re.I)
+YES = re.compile(r"\b(yes|yeah|yep|yup|ya|sure|ok(?:ay)?|please|go ahead|do it|bet|alright|slow(?:er|ly)?|"
+                 r"one by one|step by step|repeat|again|go through|break it down)\b", re.I)
 NO = re.compile(r"^\W*(no|nah|nope|i'?m good|all good|never ?mind|stop|cancel)\b", re.I)
 NEXT = re.compile(r"\b(next|got it|gotcha|ok(?:ay)?|yes|yeah|yep|yup|done|go|continue|ready|cool|alright|"
                   r"sure|k|keep going|go on|and)\b", re.I)
 REPEAT = re.compile(r"\b(repeat|again|what|huh|come again|pardon|sorry|say that|one more time|slower)\b", re.I)
 BACK = re.compile(r"\b(back|previous|last one|before that)\b", re.I)
+SEND = re.compile(r"\b(whats ?app|psn|play ?station|send|text|message|dm|drop it|post)\b", re.I)
+PSN = re.compile(r"\b(psn|play ?station)\b", re.I)
+GROUP = re.compile(r"\b(group|everyone|squad|boys|all of us|the chat)\b", re.I)
 STOP = re.compile(r"\b(stop|cancel|never ?mind|that'?s enough|i'?m good|enough|quit|no)\b", re.I)
 
 
@@ -89,23 +94,24 @@ class Loadouts:
         self.http = httpx.AsyncClient(timeout=httpx.Timeout(6, connect=3))   # no oMLX key on this one
         self.offer = None        # steps waiting for a yes to "go through it slow?"
         self.steps, self.i = [], 0
+        self.written = []        # the class as text messages (<= 500 chars each), for "send it"
 
     async def aclose(self):
         await self.http.aclose()
 
     @property
     def active(self):
-        return bool(self.steps) or self.offer is not None
+        return bool(self.steps) or self.offer is not None or bool(self.written)
 
     def reset(self):
-        self.offer, self.steps, self.i = None, [], 0
+        self.offer, self.steps, self.i, self.written = None, [], 0, []
 
     async def _get(self, path, **params):
         r = await self.http.get(API + path, params={k: v for k, v in params.items() if v})
         r.raise_for_status()
         return r.json()
 
-    async def answer(self, text, scene_game=""):
+    async def answer(self, text, scene_game="", can_send=False):
         """The class (and the steps for a slow read), or None if this isn't a class question."""
         if not CLASS_Q.search(text):
             return None
@@ -140,7 +146,8 @@ class Loadouts:
         info = await self._get(f"/games/{game}")
         mname = next((x["name"] for x in info.get("modes", []) if x["id"] == mode or x["name"].lower() == (mode or "")),
                      (info.get("modes") or [{}])[0].get("name", ""))
-        say, steps = [f"{info.get('name', game)} {mname}:" if mname else f"{info.get('name', game)}:"], []
+        title = f"{info.get('name', game)} {mname}".strip()
+        say, steps, written = [f"{title}:"], [], []
         for n, w in enumerate(guns):
             gun, typ, atts = _gun_lines(w)
             role = ("Primary" if n == 0 else "Secondary") if len(guns) > 1 else "Run"
@@ -149,15 +156,48 @@ class Loadouts:
                           if atts else "No attachments listed."))
             steps.append(f"{role}, the {gun}.")
             steps += [f"{s.capitalize()}: {a}." for s, a in atts]
-        say.append("Want me to go through it slow, one by one?")
+            b = w.get("build") or {}
+            written.append(f"{role}: {w.get('name', '')}" + (f" ({typ})" if typ else "") + "\n" + "\n".join(
+                f"- {slot_name(a.get('slot', '')).capitalize()}: {a.get('name', '')}" for a in b.get("attachments") or []))
+        say.append("Want me to go through it slow, or send it to WhatsApp or PSN?" if can_send
+                   else "Want me to go through it slow, one by one?")
         self.reset()
         self.offer = steps
+        whole = f"{title} class (wzmeta)\n\n" + "\n\n".join(written)
+        self.written = [whole] if len(whole) <= 490 else [f"{title} class (wzmeta)\n{x}"[:490] for x in written]
         return " ".join(say), steps
 
-    def follow(self, text):
-        """While a class is on the table: the reply to 'yes' / 'next' / 'repeat' / 'back' / 'stop',
-        or None to let the question go to the model as usual (and drop the class)."""
+    async def _send(self, t, asker, send, names, me):
+        """'send it' / 'to my WhatsApp' / 'to Ace' / 'the group' / 'PSN'. A friend asking (party
+        audio) can't be told apart, so their sends go to the group."""
+        to = next((n for n in names if re.search(r"\b" + re.escape(n) + r"\b", t, re.I)), None)
+        if not to and asker == "mic" and re.search(r"\b(me|my|mine)\b", t, re.I):
+            to = me
+        if PSN.search(t):
+            tool, args, where = "send_psn_group_message", {}, "the PSN group"
+        elif to and not GROUP.search(t):
+            tool, args, where = "send_whatsapp_dm", {"to": to}, "your WhatsApp" if to == me else f"{to}'s WhatsApp"
+        elif GROUP.search(t) or asker != "mic" or not me:
+            tool, args, where = "send_whatsapp_group_message", {}, "the WhatsApp group"
+        else:
+            tool, args, where = "send_whatsapp_dm", {"to": me}, "your WhatsApp"
+        for msg in self.written:
+            res = str(await send(tool, dict(args, message=msg)))
+            if res.startswith("error") or re.search(r'"(ok|success)":\s*false|"error":\s*"', res[:400]):
+                why = re.search(r'"(?:error|detail|message)":\s*"([^"]{1,90})', res)
+                return f"Couldn't send it to {where}: {why.group(1) if why else res[:80]}."
+        self.reset()
+        return f"Sent it to {where}."
+
+    async def follow(self, text, asker="mic", send=None, names=(), me=""):
+        """While a class is on the table: the reply to 'yes' / 'next' / 'repeat' / 'back' / 'stop' /
+        'send it', or None to let the question go to the model as usual (and drop the class)."""
         t = text.strip()
+        if self.written and send and SEND.search(t) and not NO.search(t):
+            return await self._send(t, asker, send, names, me)
+        if self.offer is None and not self.steps:
+            self.reset()                      # only the text was left: anything else drops it
+            return None
         if self.offer is not None:
             steps, self.offer = self.offer, None
             if YES.search(t) and not NO.search(t):

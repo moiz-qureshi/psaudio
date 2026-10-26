@@ -225,8 +225,11 @@ class SquadMode:
 
     # -- ears --------------------------------------------------------------------------
     def _busy(self):
-        """The normal AI key / wake word owns the moment (it will answer itself)."""
-        return self.b.listening or self.b.state in ("listening", "thinking", "speaking")
+        """The normal AI key / wake word owns the moment (it will answer itself). The
+        player flags the buddy "speaking" for squad mode's own lines too: that one doesn't count."""
+        if self.b.listening or self.b.state in ("listening", "thinking"):
+            return True
+        return self.b.state == "speaking" and not self.speaking
 
     def _squad_ok(self):
         """Ignore the party side while Hasaan talks and just after: his own voice
@@ -464,6 +467,7 @@ class SquadMode:
         self.b.question, self.b.reply = heard[-200:], text      # the deck's LAST REPLY panel
         self.b.bump()
         log.info("squad (%s): %r", why, text)
+        pushed = 0
         try:
             held, started = bytearray(), False
             async for pcm in local_backend.tts_stream(self.client, self.base, p, text):
@@ -471,13 +475,17 @@ class SquadMode:
                     break                              # STOP, or someone pressed the AI key
                 if started:
                     self.b.player.push(pcm)
+                    pushed += len(pcm)
                     continue
                 held += pcm
                 if len(held) >= OUT_RATE * 2 * local_backend.JITTER_S:
                     started = True
                     self.b.player.push(bytes(held))
+                    pushed += len(held)
             if not started and held:
                 self.b.player.push(bytes(held))
+                pushed += len(held)
+            self.stats["last_audio_s"] = round(pushed / (OUT_RATE * 2), 2)
             self.said.append(text)
             self.lines.append((time.monotonic(), "Hasaan (you)", text, True))
             self.stats["spoke"] += 1

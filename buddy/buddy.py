@@ -100,9 +100,7 @@ DEFAULTS = {
         "session_off_after_s": 7200,  # AI SESSION switches itself off after this long unused
     },
     "squad": {                    # SQUAD key: always-on party member (squad_mode.py), all local
-        "frame_url": "http://192.168.4.38:8898",   # PS5 Stream app on the MacBook
-        "vision_model": "Qwen3-VL-8B-Instruct-MLX-4bit",
-        "look_every_s": 1.5,      # check the picture this often (described only when it changed)
+        "scene_url": "http://192.168.4.38:8899",   # ps5_scene.py on the MacBook: live screen facts + timeline
         "quiet_s": 4.0,           # chime in only after this much quiet
         "cooldown_s": 20,         # at least this long between lines nobody asked for
         "idle_comment_s": 240,    # a dead-quiet party gets a line about this often
@@ -989,6 +987,7 @@ class Buddy:
                 if d.feed not in mic.taps:
                     mic.taps.append(d.feed)
                 await mic.start()
+        self.squad_mode.ensure_scene()      # the live PS5 screen, for every answer
         self.bump()
 
     async def disconnect(self, why):

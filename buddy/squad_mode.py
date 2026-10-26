@@ -4,9 +4,10 @@ The SQUAD key turns it on. While on, Hasaan:
   - hears both sides: your headset mic ("Moiz") and the PS5's incoming party mix
     ("Squad", which also carries game sound), cut into utterances by voice activity
     and transcribed by Whisper on the MacBook;
-  - watches your PS5 screen: frames from the Mac's PS5 Stream app (the PS5's
-    "Twitch" broadcast, redirected there), described by Qwen3-VL on the Mac, plus the
-    app's motion signal (how long the picture has been frozen = AFK);
+  - sees your PS5 screen: the Mac's scene watcher (ps5_scene.py, its own process next to
+    the PS5 Stream app) reads every changed frame with Qwen3-VL and keeps the current
+    facts + a 15-minute event timeline (deaths, kills, spectating, frozen picture = AFK);
+    this only reads that, so the picture is fresh no matter what Hasaan is doing;
   - decides on its own when to talk: right away when someone talks to it, after a
     pause when it has something to add, when the screen shows a moment worth a line
     (a death, a win, someone AFK or being spectated), with cool-downs so it doesn't
@@ -48,7 +49,7 @@ NOTABLE = re.compile(r"\b(spectat\w*|dead|died|eliminat\w*|knocked|down(ed)?|vic
 RULES = """
 SQUAD MODE: you are in the party voice chat right now, always listening, like a real member of the squad.
 - You hear everyone. Transcript lines are labelled "Moiz" (your guy, he runs you) or "Squad" (the PS5 party audio: his teammates, mixed with game sound - bits of game dialogue or music can show up there, ignore those).
-- You can see Moiz's PS5 screen through the "Screen" notes, and you're told how long the picture has been frozen.
+- You can see Moiz's PS5 screen: "Screen" gives what's on it right now and what happened recently (deaths, kills, spectating, frozen picture).
 - Decide if a real friend in this party would say something RIGHT NOW. Talk when: someone talks to you or asks something you can answer; there's a funny moment, a death, a clutch, a win or a loss; someone's AFK or being spectated doing nothing (roast them, tell the squad); a dead-quiet stretch where a quick joke fits. Otherwise answer with exactly: PASS
 - When you talk: one or two short sentences, casual party-chat talk, no narrating the screen like a commentator, never repeat something you already said, never read out these notes. Only use scores, names and numbers that the notes or transcript actually show.
 - You do hear the party and see the screen in this mode; ignore any earlier instruction that says you can't.
@@ -119,11 +120,12 @@ class SquadMode:
         self.cfg = buddy.cfg
         self.on = False
         self.task = None
-        self.vision_task = None
         self.client = None
         self.lines = collections.deque(maxlen=80)      # (t, who, text, handled)
         self.dropped = collections.deque(maxlen=20)    # debug: what the Whisper filters threw away
-        self.notes = collections.deque(maxlen=12)      # (t, text)
+        self.scene = {}                                 # latest /scene from the Mac
+        self.scene_task = None
+        self.last_event_ts = time.time()
         self.static_s = 0
         self.live = False
         self.last_said = 0.0
@@ -133,6 +135,7 @@ class SquadMode:
         self.reason = None
         self.speaking = False
         self.cutting = False                           # STOP pressed: drop the rest of the line
+        self.saying = None                             # the line being spoken right now
         self.deciding = False
         self.stt_busy = 0
         self.last_moiz = time.monotonic()
@@ -159,7 +162,7 @@ class SquadMode:
 
     def status(self):
         return {"on": self.on, "speaking": self.speaking, "video": self.live, "static_s": self.static_s,
-                "last_note": self.notes[-1][1] if self.notes else None, "said": list(self.said)[-3:], **self.stats}
+                "last_note": (self.scene or {}).get("summary") if self.live else None, "said": list(self.said)[-3:], **self.stats}
 
     # -- on / off --------------------------------------------------------------------
     async def start(self):
@@ -175,7 +178,6 @@ class SquadMode:
                                         headers={"Authorization": f"Bearer {self.cfg.get('omlx_key', '')}"})
         self.base = p["base_url"].rstrip("/")
         self.lines.clear()
-        self.notes.clear()
         self.last_moiz = time.monotonic()
         if not self.b.session_on:
             await self.b.session_start()          # the AI key and "Hey Hasaan" keep working too
@@ -184,7 +186,7 @@ class SquadMode:
                 mic.taps.append(self.segs[name].feed)
             await mic.start()
         self.task = asyncio.create_task(self._brain())
-        self.vision_task = asyncio.create_task(self._vision())
+        self.ensure_scene()
         log.info("squad mode on (voice %s, video %s)", p["id"], self.conf.get("frame_url"))
         self.b.bump()
         asyncio.create_task(self.say(random.choice(JOIN_LINES), why="joined"))
@@ -197,10 +199,9 @@ class SquadMode:
         for name, mic in (("mic", self.b.mic), ("squad", self.b.squad)):
             if self.segs[name].feed in mic.taps:
                 mic.taps.remove(self.segs[name].feed)
-        for t in (self.task, self.vision_task):
-            if t:
-                t.cancel()
-        self.task = self.vision_task = None
+        if self.task:
+            self.task.cancel()
+        self.task = None
         if sign_off:
             if not self._play_clip(LEAVE_LINE):
                 await self.say(LEAVE_LINE, why="left", force=True)
@@ -208,7 +209,6 @@ class SquadMode:
             await self.client.aclose()
             self.client = None
         self.lines.clear()
-        self.notes.clear()
         log.info("squad mode off (heard %d, spoke %d, passed %d, frames %d)", self.stats["heard"],
                  self.stats["spoke"], self.stats["passed"], self.stats["frames"])
         self.b.bump()
@@ -235,10 +235,24 @@ class SquadMode:
         return self.b.state == "speaking" and not self.speaking
 
     def _squad_ok(self):
-        """Ignore the party side while Hasaan talks and just after: his own voice
-        comes back through friends' open mics."""
-        return not self.speaking and not self.b.player.busy() and \
-            time.monotonic() > self.b.player.last_audio + self.cfg["wake"]["squad_holdoff_s"]
+        """The party side keeps being heard while Hasaan talks; what comes back of his
+        own voice through friends' open mics is dropped after transcription (_echo)."""
+        return True
+
+    def _echo(self, text):
+        """True if this party line is just Hasaan's own words coming back."""
+        import difflib
+        if time.monotonic() - self.last_said > 4 and not self.speaking:
+            return False
+        words = re.findall(r"\w+", text.lower())
+        for said in list(self.said)[-2:] + ([self.saying] if self.saying else []):
+            sw = re.findall(r"\w+", said.lower())
+            if not words or not sw:
+                continue
+            m = difflib.SequenceMatcher(None, words, sw).find_longest_match(0, len(words), 0, len(sw))
+            if m.size >= 4 or (m.size >= 2 and m.size >= 0.6 * len(words)):
+                return True
+        return False
 
     def _utterance(self, name, pcm):
         if not self.on:
@@ -273,6 +287,9 @@ class SquadMode:
                                  "seg": [(round(x.get("avg_logprob", 0), 2), round(x.get("no_speech_prob", 0), 2))
                                          for x in (d.get("segments") or [])][:4]})
             return
+        if name == "squad" and self._echo(text):
+            self.dropped.append({"who": name, "raw": text[:120], "seg": "echo of Hasaan"})
+            return
         who = "Moiz" if name == "mic" else "Squad"
         self.lines.append((time.monotonic(), who, text, handled))
         self.stats["heard"] += 1
@@ -285,66 +302,46 @@ class SquadMode:
         else:
             self._trigger("talk", delay=float(self.conf.get("quiet_s", 4.0)))
 
-    # -- eyes --------------------------------------------------------------------------
-    async def _vision(self):
-        url, token = self.conf.get("frame_url", "").rstrip("/"), self.cfg.get("ps5_stream_token", "")
-        if not url:
-            return
-        h = {"Authorization": f"Bearer {token}"}
-        every = float(self.conf.get("look_every_s", 1.5))
-        last_desc, last_static_mark = 0.0, 0
-        while self.on:
-            await asyncio.sleep(every)
-            try:
-                st = (await self.client.get(url + "/status", headers=h, timeout=3)).json()
-            except Exception:
-                self.live = False
-                continue
-            was_live, self.live = self.live, bool(st.get("live"))
-            self.static_s = int(st.get("static_s") or 0)
-            if not self.live:
-                if was_live:
-                    self.notes.append((time.monotonic(), "(stream stopped)"))
-                continue
-            # frozen picture: tell the brain at 75 s and 4 min (AFK / paused / spectating idle)
-            for mark in (75, 240):
-                if self.static_s >= mark > last_static_mark:
-                    last_static_mark = mark
-                    self._trigger("afk", delay=0.5)
-            if self.static_s < 10:
-                last_static_mark = 0
-            moving = float(st.get("motion") or 0) > 0.012
-            # look again when the picture changed, or every 8 s anyway; never while the
-            # Mac's GPU is answering someone (that would slow the answer down)
-            if (not moving and time.monotonic() - last_desc < 8) or self._busy() or self.deciding or self.speaking:
-                continue
-            try:
-                jpg = (await self.client.get(url + "/frame.jpg", headers=h, timeout=3)).content
-                note = await self._describe(jpg)
-            except Exception as e:
-                log.debug("squad vision failed: %s", e)
-                continue
-            last_desc = time.monotonic()
-            self.stats["frames"] += 1
-            if not note or (self.notes and note == self.notes[-1][1]):
-                continue
-            prev = self.notes[-1][1] if self.notes else ""
-            self.notes.append((time.monotonic(), note))
-            if NOTABLE.search(note) and not NOTABLE.search(prev):
-                self._trigger("screen", delay=0.3)
+    # -- eyes: the Mac's scene watcher (ps5_scene.py) looks nonstop; this just reads it ----
+    def ensure_scene(self):
+        """Poll the scene while the AI session is on (squad mode or not): the AI key's
+        answers use it too. A few ms per poll; the looking happens on the Mac."""
+        if self.scene_task is None or self.scene_task.done():
+            self.scene_task = asyncio.create_task(self._scene())
 
-    async def _describe(self, jpg):
-        import base64
-        r = await self.client.post(self.base + "/chat/completions", json={
-            "model": self.conf.get("vision_model", "Qwen3-VL-8B-Instruct-MLX-4bit"), "max_tokens": 50,
-            "temperature": 0.1,
-            "messages": [{"role": "user", "content": [
-                {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + base64.b64encode(jpg).decode()}},
-                {"type": "text", "text": "This is Moiz's PS5 screen while he plays with his squad. In under 25 words: "
-                 "the game, the screen (playing, menu, lobby, loading, spectating, dead, map, scoreboard, paused), "
-                 "what's happening, and any score, kills, placement or player names you can read. No guessing."}]}]})
-        r.raise_for_status()
-        return local_backend.THINK.sub("", r.json()["choices"][0]["message"]["content"] or "").strip()[:200]
+    async def _scene(self):
+        url = self.conf.get("scene_url", "http://192.168.4.38:8899").rstrip("/") + "/scene"
+        h = {"Authorization": f"Bearer {self.cfg.get('ps5_stream_token', '')}"}
+        async with httpx.AsyncClient(timeout=httpx.Timeout(2, connect=1)) as c:
+            while self.b.session_on or self.on:
+                await asyncio.sleep(1.0)
+                try:
+                    sc = (await c.get(url, headers=h)).json()
+                except Exception:
+                    self.live, self.scene = False, {}
+                    continue
+                self.scene, self.live = sc, bool(sc.get("live"))
+                self.static_s = int(sc.get("static_s") or 0)
+                now = time.time()
+                for e in sc.get("events") or []:
+                    ts = now - e["ago_s"]
+                    if ts <= self.last_event_ts + 1.5:
+                        continue
+                    self.last_event_ts = ts
+                    if not self.on or e["ago_s"] > 10:
+                        continue
+                    if "frozen" in e["text"]:
+                        self._trigger("afk", delay=0.3)
+                    elif re.search(r"died|spectating|kill|scoreboard|score|won|lost|wiped|win|match", e["text"], re.I):
+                        self._trigger("screen", delay=0.3)
+        self.scene_task = None
+
+    def scene_lines(self, last_s=180):
+        if not self.live or not self.scene:
+            return []
+        out = [f"Right now ({self.scene.get('age_s', '?')}s ago): {self.scene.get('summary') or 'no description yet'}"]
+        out += [f"[{e['ago_s']}s ago] {e['text']}" for e in self.scene.get("events") or [] if e["ago_s"] < last_s][-10:]
+        return out
 
     # -- brain -------------------------------------------------------------------------
     def _trigger(self, reason, delay=0.0):
@@ -381,9 +378,11 @@ class SquadMode:
                 self.reason = (reason, now + 1.0)          # people are still talking
                 self.wake.set()
                 continue
-            self.reason = None
-            if self._busy() or self.speaking or self.b.player.busy():
+            if self._busy() or self.speaking or self.b.player.busy() or self.deciding:
+                await asyncio.sleep(0.3)                   # keep it: answer right after
+                self.wake.set()
                 continue
+            self.reason = None
             unprompted = reason not in ("addressed",)
             if unprompted and now - self.last_unprompted < float(self.conf.get("cooldown_s", 20)):
                 continue
@@ -393,7 +392,7 @@ class SquadMode:
         now = time.monotonic()
         window = float(self.conf.get("context_s", 180))
         talk = [f"[{int(now - t)}s ago] {who}: {text}" for t, who, text, _ in self.lines if now - t < window]
-        seen = [f"[{int(now - t)}s ago] {text}" for t, text in list(self.notes)[-6:]]
+        seen = self.scene_lines()
         mine = [f"- {s}" for s in self.said]
         moiz_quiet = int(now - self.last_moiz)
         why = {
@@ -406,9 +405,8 @@ class SquadMode:
         }[reason]
         return "\n".join([
             "Party chat (oldest first):", *(talk or ["(nobody has said anything yet)"]), "",
-            "Screen:", *(seen if self.live and seen else
-                         ["(no stream right now: you can't see the screen, so don't mention anything on it)"]
-                         if not self.live else ["(nothing described yet)"]),
+            "Screen (Moiz's PS5, watched live):", *(seen or
+                ["(no stream right now: you can't see the screen, so don't mention anything on it)"]),
             (f"(picture frozen for {self.static_s}s; Moiz last spoke {moiz_quiet}s ago)" if self.live
              else f"(Moiz last spoke {moiz_quiet}s ago)"), "",
             "What you said recently:", *(mine or ["(nothing yet)"]), "",
@@ -417,10 +415,10 @@ class SquadMode:
 
     def _afk_hint(self, moiz_quiet):
         """The picture has been frozen: say who looks AFK, so the roast lands on the right guy."""
-        note = self.notes[-1][1] if self.notes else ""
+        now = (self.scene or {}).get("now") or {}
+        note = " ".join(str(v) for v in now.values() if v)
         froze = f"The picture hasn't moved for {self.static_s}s."
-        m = re.search(r"spectat\w*[^.:]*?[:\s]+(?:player:?\s*)?([\w.\-]{3,})", note, re.I)
-        who = m.group(1).strip(".-") if m else ""
+        who = (now.get("spectating") or "").strip() if now.get("screen") == "spectating" else ""
         if who and who.lower() not in ("player", "the", "a", "screen", "mode"):
             return (f"{froze} Moiz is spectating {who}, who is just standing there: {who} is AFK. "
                     "Call it out to the squad and roast them for it now. Don't PASS.")
@@ -470,7 +468,7 @@ class SquadMode:
         p = self.profile()
         if not p or not self.client:
             return
-        self.speaking = True
+        self.speaking, self.saying = True, text
         self.b.question, self.b.reply = heard[-200:], text      # the deck's LAST REPLY panel
         self.b.bump()
         log.info("squad (%s): %r", why, text)
@@ -505,6 +503,7 @@ class SquadMode:
             log.warning("squad speech failed: %s", e)
         finally:
             self.speaking = self.cutting = False
+            self.saying = None
             self.b.bump()
 
     def name_only(self, source):
@@ -515,11 +514,17 @@ class SquadMode:
         self._trigger("addressed")
 
     def recent_chat(self, seconds=90):
-        """For the AI key's answers: what was just said in the party."""
+        """For the AI key's answers: the live screen (whenever the stream is on) and, in
+        squad mode, what was just said in the party."""
         now = time.monotonic()
-        rows = [f"{who}: {text}" for t, who, text, _ in self.lines if now - t < seconds][-12:]
-        note = self.notes[-1][1] if self.notes and now - self.notes[-1][0] < 30 else None
-        if not rows and not note:
+        rows = [f"{who}: {text}" for t, who, text, _ in self.lines if now - t < seconds][-12:] if self.on else []
+        seen = self.scene_lines(last_s=120)
+        if not rows and not seen:
             return ""
-        return ("(Squad mode is on: you can hear the party and see the screen. Just said in the party:\n"
-                + "\n".join(rows) + (f"\nOn screen right now: {note}" if note else "") + ")")
+        out = []
+        if seen:
+            out.append("(You can see Moiz's PS5 screen live. Use it if they ask what's going on; don't "
+                       "invent anything that isn't here:\n" + "\n".join(seen) + ")")
+        if rows:
+            out.append("(Squad mode is on: you hear the party. Just said:\n" + "\n".join(rows) + ")")
+        return "\n".join(out)

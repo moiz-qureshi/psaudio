@@ -105,7 +105,7 @@ final class Stream {
         p.executableURL = URL(fileURLWithPath: ffmpeg)
         p.arguments = ["-hide_banner", "-y", "-nostdin", "-loglevel", "error", "-fflags", "nobuffer", "-flags", "low_delay",
                        "-rtsp_transport", "tcp", "-i", "rtsp://127.0.0.1:8554/\(path)", "-an",
-                       "-vf", "fps=\(fps),scale=960:-2", "-q:v", "5",
+                       "-vf", "fps=\(fps),scale=768:-2", "-q:v", "5",
                        "-f", "image2", "-update", "1", "-atomic_writing", "1", framePath]
         p.standardOutput = FileHandle.nullDevice
         p.standardError = FileHandle.nullDevice

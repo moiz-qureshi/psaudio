@@ -40,7 +40,6 @@ REPEAT = re.compile(r"\b(repeat|again|what|huh|come again|pardon|sorry|say that|
 BACK = re.compile(r"\b(back|previous|last one|before that)\b", re.I)
 SEND = re.compile(r"\b(whats ?app|psn|play ?station|send|text|message|dm|drop it|post)\b", re.I)
 PSN = re.compile(r"\b(psn|play ?station)\b", re.I)
-GROUP = re.compile(r"\b(group|everyone|squad|boys|all of us|the chat)\b", re.I)
 STOP = re.compile(r"\b(stop|cancel|never ?mind|that'?s enough|i'?m good|enough|quit|no)\b", re.I)
 
 
@@ -159,7 +158,7 @@ class Loadouts:
             b = w.get("build") or {}
             written.append(f"{role}: {w.get('name', '')}" + (f" ({typ})" if typ else "") + "\n" + "\n".join(
                 f"- {slot_name(a.get('slot', '')).capitalize()}: {a.get('name', '')}" for a in b.get("attachments") or []))
-        say.append("Want me to go through it slow, or send it to WhatsApp or PSN?" if can_send
+        say.append("Want me to go through it slow, or send it to the WhatsApp or PSN group?" if can_send
                    else "Want me to go through it slow, one by one?")
         self.reset()
         self.offer = steps
@@ -168,19 +167,13 @@ class Loadouts:
         return " ".join(say), steps
 
     async def _send(self, t, asker, send, names, me):
-        """'send it' / 'to my WhatsApp' / 'to Ace' / 'the group' / 'PSN'. A friend asking (party
-        audio) can't be told apart, so their sends go to the group."""
-        to = next((n for n in names if re.search(r"\b" + re.escape(n) + r"\b", t, re.I)), None)
-        if not to and asker == "mic" and re.search(r"\b(me|my|mine)\b", t, re.I):
-            to = me
+        """'send it' / 'the group' / 'PSN'. Classes only ever go to a group chat, never a DM:
+        on party audio a friend's voice can't be told apart from yours, so 'send it to me'
+        could land in the wrong person's WhatsApp. PSN if they said PSN, else the WhatsApp group."""
         if PSN.search(t):
             tool, args, where = "send_psn_group_message", {}, "the PSN group"
-        elif to and not GROUP.search(t):
-            tool, args, where = "send_whatsapp_dm", {"to": to}, "your WhatsApp" if to == me else f"{to}'s WhatsApp"
-        elif GROUP.search(t) or asker != "mic" or not me:
-            tool, args, where = "send_whatsapp_group_message", {}, "the WhatsApp group"
         else:
-            tool, args, where = "send_whatsapp_dm", {"to": me}, "your WhatsApp"
+            tool, args, where = "send_whatsapp_group_message", {}, "the WhatsApp group"
         for msg in self.written:
             res = str(await send(tool, dict(args, message=msg)))
             if res.startswith("error") or re.search(r'"(ok|success)":\s*false|"error":\s*"', res[:400]):

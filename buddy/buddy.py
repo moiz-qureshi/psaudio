@@ -701,10 +701,16 @@ class Buddy:
             log.warning("match stats unavailable: %s %s", type(e).__name__, e)
             return None
         m, lines = d.get("match"), []
+        which = "This match"
+        if not m and d.get("recent"):
+            m, which = d["recent"][-1], "Last match (none being played right now)"
         if m:
             mode = f" ({m['mode'].title()})" if m.get("mode") else ""
-            lines.append(f"This match: {m.get('game_name') or m.get('game')}{mode}"
+            lines.append(f"{which}: {m.get('game_name') or m.get('game')}{mode}"
                          + (f", score {m['score']} (top number first, as on his HUD)" if m.get("score") else ""))
+            rd = m.get("rounds") or {}
+            if rd.get("won") or rd.get("lost"):
+                lines.append(f"Rounds: won {rd.get('won', 0)}, lost {rd.get('lost', 0)}")
             lines.append(f"His kills: {m.get('kills', 0)}" + (f" ({', '.join(m['victims'][-8:])})" if m.get("victims") else ""))
             dd = m.get("deaths_detail") or []
             how = [f"{x['by']}" + (f" with {x['weapon']}" if x.get("weapon") else "") for x in dd[-5:] if x.get("by")]
@@ -717,6 +723,12 @@ class Buddy:
             if mine:
                 lines.append(f"Last scoreboard: {mine.get('kills')} kills, {mine.get('deaths')} deaths, score {mine.get('score')}"
                              + (f", teams {sb['teams']}" if sb.get("teams") else ""))
+            named = [r for r in sb.get("rows", []) if re.search(r"[A-Za-z]{2}", r.get("name") or "")]
+            if named:                                         # a misread board puts numbers in the name column
+                sb = dict(sb, rows=named)
+                lines.append("Scoreboard: " + "; ".join(
+                    f"{r['name']} {r.get('kills')}-{r.get('deaths')}" + (f" ({r['status']})" if r.get("status") else "")
+                    + (" [squad]" if r.get("squad") else "") for r in sb["rows"][:12]))
         for g, t in (d.get("today") or {}).items():
             lines.append(f"Today in {g}: {t['matches']} matches, {t['kills']} kills, {t['deaths']} deaths")
         if not lines:

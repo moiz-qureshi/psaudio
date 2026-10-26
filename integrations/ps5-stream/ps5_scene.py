@@ -418,8 +418,11 @@ CARD_PROMPT = ("A death / kill-cam screen. Read only what is there, one per line
                "KILLED BY: the killer's gamertag exactly as written, or -\n"
                "KILLED WITH: the weapon, or -\n"
                "BUILD: the attachments listed with the weapon, comma separated, or -")
-BOARD_PROMPT = ("A game scoreboard. One line per player, top to bottom, as: team | gamertag | kills | deaths | "
-                "score. Then a last line: TEAMS: our score - their score. - for anything not readable.")
+BOARD_PROMPT = ("A game scoreboard or round-result screen. First line: BANNER: big result text such as "
+                "ROUND WIN, ROUND LOSS, VICTORY or DEFEAT, plus the reason under it (e.g. JSOF ELIMINATED), or -. "
+                "Then one line per player on a scoreboard, top to bottom, as: team | gamertag | kills | deaths | "
+                "score | status (alive, dead, spectating, or killed by NAME if shown). Then a last line: "
+                "TEAMS: our score - their score. - for anything not readable.")
 FEED_RE = re.compile(r"^\s*(?:FEED:\s*)?[-•*]?\s*(?P<k>[^>\n]{2,32}?)\s*>\s*(?P<v>[^(\n]{2,32}?)\s*(?:\((?P<w>[^)]{1,40})\))?\s*$")
 GAME_IDS = [(r"warzone", "warzone"), (r"black ops (?:7|vii)|\bbo7\b", "bo7"), (r"black ops (?:6|vi)|\bbo6\b", "bo6"),
             (r"modern warfare|\bmw4?\b", "mw4")]
@@ -692,8 +695,11 @@ def read_hud(jpg, game):
 
 
 def read_board(jpg):
-    rows, teams = [], None
-    for line in vlm(shrink(jpg, 1600), BOARD_PROMPT, 400).splitlines():
+    rows, teams, banner = [], None, None
+    for line in vlm(shrink(jpg, 1600), BOARD_PROMPT, 450).splitlines():
+        if line.upper().startswith("BANNER:"):
+            banner = field(line[7:])
+            continue
         if line.upper().startswith("TEAMS:"):
             m = SCORE_RE.match(line[6:].strip() or "")
             teams = f"{m.group(1)}-{m.group(2)}" if m else None
@@ -701,9 +707,24 @@ def read_board(jpg):
         p = [field(x) for x in line.split("|")]
         if len(p) >= 5 and p[1]:
             num = lambda s: int(s) if s and s.isdigit() else None
-            rows.append({"team": p[0], "name": p[1], "kills": num(p[2]), "deaths": num(p[3]), "score": num(p[4]),
-                         "me": is_me(p[1])})
-    return {"t": time.time(), "rows": rows[:24], "teams": teams} if rows else None
+            rows.append({"team": p[0], "name": clean_name(p[1]), "kills": num(p[2]), "deaths": num(p[3]),
+                         "score": num(p[4]), "status": p[5] if len(p) > 5 else None, "me": is_me(p[1]),
+                         "squad": is_mate(p[1])})
+    return {"t": time.time(), "rows": rows[:24], "teams": teams, "banner": banner} if (rows or banner) else None
+
+
+def note_banner(m, banner):
+    """ROUND WIN / ROUND LOSS / VICTORY / DEFEAT: tally per match (a banner stays up a few seconds)."""
+    b = (banner or "").upper()
+    res = "win" if re.search(r"\bWIN|VICTORY|WON\b", b) else "loss" if re.search(r"LOSS|DEFEAT|LOST", b) else None
+    if not res:
+        return
+    last = (m.get("rounds") or [{}])[-1]
+    if last.get("result") == res and time.time() - last.get("t", 0) < 20:
+        return
+    m.setdefault("rounds", []).append({"t": time.time(), "result": res, "text": banner})
+    final = bool(re.search(r"VICTORY|DEFEAT", b))
+    add_event(("match " if final else "round ") + ("won" if res == "win" else "lost") + f": {banner}")
 
 
 def hud_loop():
@@ -735,7 +756,9 @@ def hud_loop():
                 if board:
                     with lock:
                         m = cur_match()
-                        m["scoreboard"] = board
+                        note_banner(m, board.get("banner"))
+                        if board["rows"]:
+                            m["scoreboard"] = board
                         mine = next((r for r in board["rows"] if r["me"]), None)
                         if mine and mine.get("kills") is not None:
                             m["kills"] = max(m["kills"], mine["kills"])
@@ -779,6 +802,8 @@ def stats():
         def brief(x):
             return {k: x.get(k) for k in ("id", "game", "game_name", "mode", "kills", "deaths", "score",
                                           "victims", "killed_by", "deaths_detail", "started", "ended")} | {
+                "rounds": {"won": sum(r["result"] == "win" for r in x.get("rounds", [])),
+                           "lost": sum(r["result"] == "loss" for r in x.get("rounds", []))},
                 "feed": [f"{e['killer']} > {e['victim']}" + (f" ({e['weapon']})" if e.get("weapon") else "")
                          for e in x["feed"][-10:]],
                 "scoreboard": x.get("scoreboard")}

@@ -242,9 +242,69 @@ def g_eye(d, c, cx, cy, s):
     d.ellipse((cx - s * 0.17, cy - s * 0.17, cx + s * 0.17, cy + s * 0.17), fill=c)
 
 
+def g_copy(d, c, cx, cy, s):             # two overlapping sheets
+    w = int(s * 0.08)
+    d.rounded_rectangle((cx - s * 0.38, cy - s * 0.42, cx + s * 0.12, cy + s * 0.18), radius=s * 0.08, outline=c, width=w)
+    d.rounded_rectangle((cx - s * 0.12, cy - s * 0.18, cx + s * 0.38, cy + s * 0.42), radius=s * 0.08, outline=c, width=w)
+
+
+def g_paste(d, c, cx, cy, s):            # clipboard
+    w = int(s * 0.08)
+    d.rounded_rectangle((cx - s * 0.34, cy - s * 0.36, cx + s * 0.34, cy + s * 0.46), radius=s * 0.08, outline=c, width=w)
+    d.rounded_rectangle((cx - s * 0.16, cy - s * 0.48, cx + s * 0.16, cy - s * 0.3), radius=s * 0.05, fill=c)
+    for y in (-0.08, 0.1, 0.28):
+        d.line((cx - s * 0.18, cy + y * s, cx + s * 0.18, cy + y * s), fill=c, width=int(s * 0.06))
+
+
+def g_camera(d, c, cx, cy, s):
+    w = int(s * 0.08)
+    d.rounded_rectangle((cx - s * 0.46, cy - s * 0.24, cx + s * 0.46, cy + s * 0.36), radius=s * 0.1, outline=c, width=w)
+    d.rectangle((cx - s * 0.16, cy - s * 0.36, cx + s * 0.16, cy - s * 0.24), fill=c)
+    d.ellipse((cx - s * 0.17, cy - s * 0.11, cx + s * 0.17, cy + s * 0.23), outline=c, width=w)
+
+
+def g_key(d, c, cx, cy, s):              # a vault key (Bitwarden)
+    w = int(s * 0.09)
+    d.ellipse((cx - s * 0.44, cy - s * 0.24, cx - s * 0.04, cy + s * 0.16), outline=c, width=w)
+    d.line((cx - s * 0.06, cy - s * 0.04, cx + s * 0.44, cy - s * 0.04), fill=c, width=w)
+    for x in (0.26, 0.4):
+        d.line((cx + x * s, cy - s * 0.04, cx + x * s, cy + s * 0.16), fill=c, width=w)
+
+
+def g_coffee(d, c, cx, cy, s):
+    w = int(s * 0.08)
+    d.rounded_rectangle((cx - s * 0.36, cy - s * 0.12, cx + s * 0.2, cy + s * 0.42), radius=s * 0.08, outline=c, width=w)
+    d.arc((cx + s * 0.08, cy - s * 0.02, cx + s * 0.42, cy + s * 0.28), 270, 90, fill=c, width=w)
+    for x in (-0.2, 0.0):
+        d.line((cx + x * s, cy - s * 0.42, cx + x * s, cy - s * 0.22), fill=c, width=int(s * 0.06))
+
+
+def g_moon(d, c, cx, cy, s):
+    d.ellipse((cx - s * 0.42, cy - s * 0.42, cx + s * 0.42, cy + s * 0.42), fill=c)
+    d.ellipse((cx - s * 0.2, cy - s * 0.56, cx + s * 0.6, cy + s * 0.24), fill=(0, 0, 0, 0))
+
+
+def g_undo(d, c, cx, cy, s):
+    w = int(s * 0.09)
+    d.arc((cx - s * 0.36, cy - s * 0.3, cx + s * 0.44, cy + s * 0.5), 200, 90, fill=c, width=w)
+    d.polygon([(cx - s * 0.48, cy - s * 0.02), (cx - s * 0.2, cy - s * 0.3), (cx - s * 0.12, cy + s * 0.06)], fill=c)
+
+
+def g_speaker_off(d, c, cx, cy, s):
+    g_speaker(d, c, cx - s * 0.08, cy, s * 0.9)
+    d.line((cx - s * 0.5, cy - s * 0.46, cx + s * 0.5, cy + s * 0.46), fill=c, width=int(s * 0.09))
+
+
+def g_mic_off(d, c, cx, cy, s):
+    g_mic(d, c, cx, cy, s)
+    d.line((cx - s * 0.42, cy - s * 0.46, cx + s * 0.42, cy + s * 0.46), fill=c, width=int(s * 0.09))
+
+
 GLYPHS = {"squad": g_squad, "eye": g_eye, "box": g_box, "pi": g_pi, "home": g_home, "laptop": g_laptop, "cloud": g_cloud, "globe": g_globe,
           "bot": g_bot, "mic": g_mic, "bars": g_bars, "dots": g_dots, "alert": g_alert, "unlink": g_unlink,
-          "stop": g_stop, "power": g_power, "flame": g_flame, "bulb": g_bulb, "hdmi": g_hdmi, "speaker": g_speaker}
+          "stop": g_stop, "power": g_power, "flame": g_flame, "bulb": g_bulb, "hdmi": g_hdmi, "speaker": g_speaker,
+          "copy": g_copy, "paste": g_paste, "camera": g_camera, "key": g_key, "coffee": g_coffee, "moon": g_moon,
+          "undo": g_undo, "speaker_off": g_speaker_off, "mic_off": g_mic_off}
 
 
 # -- key icons ----------------------------------------------------------------------

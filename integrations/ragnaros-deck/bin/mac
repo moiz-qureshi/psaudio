@@ -1,0 +1,81 @@
+#!/bin/bash
+# mac - the deck's MacBook page (profiles/work.yaml).
+#   mac copy | paste | undo          Cmd+C / Cmd+V / Cmd+Z in the Mac's front app
+#   mac shot                         screenshot of an area you drag, to the clipboard (Cmd+Ctrl+Shift+4)
+#   mac bitwarden                    open / bring Bitwarden to the front
+#   mac tailscale [toggle|on|off]    Tailscale on the Mac
+#   mac mute [toggle]                Mac output mute
+#   mac mic [toggle]                 Mac microphone (input volume to 0 and back)
+#   mac awake [toggle]               keep the Mac awake (caffeinate) - local Hasaan needs it awake
+#   mac displays-off                 turn the Mac's displays off (no lock password is set)
+#   mac sync                         repaint the state keys from the Mac (run by mac-sync.timer)
+# Reaches the Mac on the LAN first (it still works when Tailscale is off), then Tailscale.
+# State keys: mactailscale (on/off/offline), macmute, macmic, macawake (on/off).
+set -u
+KEY=$HOME/.ssh/macbook_automation
+LAN=moizqureshi@192.168.4.38
+SSHO=(-i "$KEY" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=2 -o ServerAliveInterval=5)
+TS=/Applications/Tailscale.app/Contents/MacOS/Tailscale
+
+run() {   # run a shell snippet on the Mac
+  ssh "${SSHO[@]}" "$LAN" "$1" 2>/dev/null || ssh "${SSHO[@]}" macbook "$1" 2>/dev/null
+}
+keys() { run "osascript -e 'tell application \"System Events\" to $1'" >/dev/null; }
+keystate() { python3 -c 'import sys,os; from ragnaros import control
+control.request(["keystate", sys.argv[1], sys.argv[2]], path=os.path.expanduser("~/.local/state/ragnaros-plus/ctl.sock"))' "$1" "$2" 2>/dev/null || true; }
+toast() { ragnarosctl toast "$1" "$2" --seconds=2 >/dev/null 2>&1 || true; }
+
+# one round trip for every state: tailscale|muted|input volume|awake
+STATE_SH="t=\$($TS status --json 2>/dev/null | /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin).get(\"BackendState\",\"?\"))' 2>/dev/null)
+m=\$(osascript -e 'output muted of (get volume settings)')
+i=\$(osascript -e 'input volume of (get volume settings)')
+a=\$(pgrep -f 'caffeinate -dims' >/dev/null && echo on || echo off)
+echo \"\$t|\$m|\$i|\$a\""
+
+paint() {   # paint the state keys from "tailscale|muted|input|awake"
+  IFS='|' read -r t m i a <<<"$1"
+  case "$t" in Running) keystate mactailscale on ;; Stopped|NeedsLogin) keystate mactailscale off ;; *) keystate mactailscale offline ;; esac
+  [ "$m" = true ] && keystate macmute on || keystate macmute off
+  [ "${i:-1}" = 0 ] && keystate macmic on || keystate macmic off
+  [ "$a" = on ] && keystate macawake on || keystate macawake off
+}
+
+sync() {
+  s=$(run "$STATE_SH")
+  if [ -z "$s" ]; then
+    for k in mactailscale; do keystate $k offline; done
+    return 1
+  fi
+  paint "$s"
+  echo "$s"
+}
+
+case "${1:-}" in
+  copy)  keys 'keystroke "c" using command down' ;;
+  paste) keys 'keystroke "v" using command down' ;;
+  undo)  keys 'keystroke "z" using command down' ;;
+  shot)  keys 'keystroke "4" using {command down, control down, shift down}'; toast "SCREENSHOT" "drag an area on the Mac" ;;
+  bitwarden) run "open -a Bitwarden" >/dev/null ;;
+  displays-off) run "pmset displaysleepnow" >/dev/null ;;
+  tailscale)
+    cur=$(run "$TS status --json 2>/dev/null | /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin).get(\"BackendState\"))'")
+    want=${2:-toggle}
+    [ "$want" = toggle ] && { [ "$cur" = Running ] && want=off || want=on; }
+    case "$want" in
+      on)  run "$TS up >/dev/null 2>&1; sleep 1" >/dev/null; toast "TAILSCALE" "on" ;;
+      off) run "$TS down >/dev/null 2>&1" >/dev/null; toast "TAILSCALE" "off (the deck still reaches the Mac on Wi-Fi)" ;;
+      *) echo "mac tailscale [toggle|on|off]" >&2; exit 2 ;;
+    esac
+    sync >/dev/null ;;
+  mute)
+    run "osascript -e 'set volume output muted (not (output muted of (get volume settings)))'" >/dev/null
+    sync >/dev/null ;;
+  mic)   # remember the input level, so unmuting puts it back
+    run "i=\$(osascript -e 'input volume of (get volume settings)'); if [ \"\$i\" -gt 0 ]; then echo \$i > ~/.deck_mic_level; osascript -e 'set volume input volume 0'; else osascript -e \"set volume input volume \$(cat ~/.deck_mic_level 2>/dev/null || echo 75)\"; fi" >/dev/null
+    s=$(sync); [ "$(cut -d'|' -f3 <<<"$s")" = 0 ] && toast "MAC MIC" "muted" || toast "MAC MIC" "live" ;;
+  awake)
+    run "if pgrep -f 'caffeinate -dims' >/dev/null; then pkill -f 'caffeinate -dims'; else nohup caffeinate -dims >/dev/null 2>&1 & fi" >/dev/null
+    s=$(sync); [ "$(cut -d'|' -f4 <<<"$s")" = on ] && toast "STAY AWAKE" "on: the Mac won't sleep" || toast "STAY AWAKE" "off" ;;
+  sync) sync ;;
+  *) echo "usage: mac copy|paste|undo|shot|bitwarden|displays-off|tailscale|mute|mic|awake|sync" >&2; exit 2 ;;
+esac

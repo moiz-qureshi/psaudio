@@ -1,0 +1,33 @@
+# MacBook page: overrides the built-in "work" page (its Linux apps can't run on headless opti3).
+# Delete this file to get the built-in one back. Actions: bin/mac; live keys repainted by mac-sync.timer.
+name: work
+strip:
+  dashboard: [clock, cpu, ram, net]
+keys:
+  "0": {icon: icons/mac_copy.png, action: /home/opti3/.config/ragnaros/bin/mac copy, dm: {i: macbook, a: copy, p: {}}}
+  "1": {icon: icons/mac_paste.png, action: /home/opti3/.config/ragnaros/bin/mac paste, dm: {i: macbook, a: paste, p: {}}}
+  "2": {icon: icons/mac_shot.png, action: /home/opti3/.config/ragnaros/bin/mac shot, dm: {i: macbook, a: shot, p: {}}}
+  "3": {icon: icons/mac_bitwarden.png, action: /home/opti3/.config/ragnaros/bin/mac bitwarden, dm: {i: macbook, a: bitwarden, p: {}}}
+  "4": {icon: icons/mactailscale.png, action: /home/opti3/.config/ragnaros/bin/mac tailscale toggle, state: mactailscale, dm: {i: macbook, a: tailscale, p: {mode: toggle}}}
+  "5": {icon: icons/macmute.png, action: /home/opti3/.config/ragnaros/bin/mac mute, state: macmute, dm: {i: macbook, a: mute, p: {}}}
+  "6": {icon: icons/macmic.png, action: /home/opti3/.config/ragnaros/bin/mac mic, state: macmic, dm: {i: macbook, a: mic, p: {}}}
+  "7": {icon: icons/macawake.png, action: /home/opti3/.config/ragnaros/bin/mac awake, state: macawake, dm: {i: macbook, a: awake, p: {}}}
+  "8": {icon: icons/mac_displays.png, action: /home/opti3/.config/ragnaros/bin/mac displays-off, dm: {i: macbook, a: displays, p: {}}}
+  "9": {icon: icons/mac_undo.png, action: /home/opti3/.config/ragnaros/bin/mac undo, dm: {i: macbook, a: undo, p: {}}}
+knobs:
+  "0":
+    rotate: {cw: /home/opti3/.config/ragnaros/mac_vol.sh +5, ccw: /home/opti3/.config/ragnaros/mac_vol.sh -5}
+    press: /home/opti3/.config/ragnaros/mac_mute.sh
+  "1":
+    rotate:
+      cw: ssh -o ConnectTimeout=3 macbook "/Users/moizqureshi/.deck_display.sh +5"
+      ccw: ssh -o ConnectTimeout=3 macbook "/Users/moizqureshi/.deck_display.sh -5"
+    press: ssh -o ConnectTimeout=3 macbook "/Users/moizqureshi/.deck_display.sh 50"
+  "2":
+    rotate:
+      cw: ssh -o ConnectTimeout=3 macbook "osascript -e 'tell application \"Music\" to next track' 2>/dev/null || osascript -e 'tell application \"Spotify\" to next track' 2>/dev/null || true"
+      ccw: ssh -o ConnectTimeout=3 macbook "osascript -e 'tell application \"Music\" to previous track' 2>/dev/null || osascript -e 'tell application \"Spotify\" to previous track' 2>/dev/null || true"
+    press: ssh -o ConnectTimeout=3 macbook "osascript -e 'tell application \"Music\" to playpause' 2>/dev/null || osascript -e 'tell application \"Spotify\" to playpause' 2>/dev/null || true"
+  "3":
+    rotate: {cw: /home/opti3/.config/ragnaros/deck_brightness.sh 10, ccw: /home/opti3/.config/ragnaros/deck_brightness.sh -10}
+    press: ragnarosctl brightness 100

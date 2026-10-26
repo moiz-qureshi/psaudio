@@ -1,0 +1,6 @@
+[Unit]
+Description=Repaint the deck's MacBook page state keys (Tailscale, mute, mic, stay awake)
+
+[Service]
+Type=oneshot
+ExecStart=%h/.config/ragnaros/bin/mac sync

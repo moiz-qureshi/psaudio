@@ -1,0 +1,30 @@
+id: macbook
+name: MacBook
+emoji: 💻
+color: "#a78bfa"
+order: 26
+description: The MacBook over the LAN (Tailscale as fallback) - copy/paste, screenshot, Bitwarden, Tailscale, mute, mic, stay awake
+health:
+  tcp: 192.168.4.38:22
+match:
+  - 'bin/mac '
+recognize:
+  - {pattern: 'bin/mac tailscale (?P<mode>toggle|on|off)$', action: tailscale}
+actions:
+  - {id: copy, name: Copy (Cmd+C), emoji: 📋, icon: icons/mac_copy.png, command: /home/opti3/.config/ragnaros/bin/mac copy}
+  - {id: paste, name: Paste (Cmd+V), emoji: 📥, icon: icons/mac_paste.png, command: /home/opti3/.config/ragnaros/bin/mac paste}
+  - {id: undo, name: Undo (Cmd+Z), emoji: ↩️, icon: icons/mac_undo.png, command: /home/opti3/.config/ragnaros/bin/mac undo}
+  - {id: shot, name: Screenshot an area to the clipboard, emoji: 📸, icon: icons/mac_shot.png, command: /home/opti3/.config/ragnaros/bin/mac shot}
+  - {id: bitwarden, name: Open Bitwarden, emoji: 🔑, icon: icons/mac_bitwarden.png, command: /home/opti3/.config/ragnaros/bin/mac bitwarden}
+  - {id: displays, name: Displays off, emoji: 🌙, icon: icons/mac_displays.png, command: /home/opti3/.config/ragnaros/bin/mac displays-off}
+  - id: tailscale
+    name: Tailscale on/off
+    emoji: 🌐
+    icon: icons/mactailscale.png
+    for: [key, touch, press]
+    params:
+      - {id: mode, label: Mode, type: select, default: toggle, options: [toggle, on, off]}
+    command: /home/opti3/.config/ragnaros/bin/mac tailscale {{mode|sh}}
+  - {id: mute, name: Mac sound mute, emoji: 🔇, icon: icons/macmute.png, for: [key, touch, press], command: /home/opti3/.config/ragnaros/bin/mac mute}
+  - {id: mic, name: Mac mic mute, emoji: 🎙️, icon: icons/macmic.png, for: [key, touch, press], command: /home/opti3/.config/ragnaros/bin/mac mic}
+  - {id: awake, name: Keep the Mac awake, emoji: ☕, icon: icons/macawake.png, for: [key, touch, press], command: /home/opti3/.config/ragnaros/bin/mac awake}

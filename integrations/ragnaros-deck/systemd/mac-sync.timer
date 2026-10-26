@@ -1,0 +1,10 @@
+[Unit]
+Description=Every 30 s: MacBook page state keys
+
+[Timer]
+OnBootSec=30
+OnUnitActiveSec=30
+AccuracySec=5
+
+[Install]
+WantedBy=timers.target

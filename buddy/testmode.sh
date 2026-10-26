@@ -7,7 +7,7 @@ if [ "$1" = on ]; then
   for n in wake_test_mic wake_test_squad buddy_test_null; do
     pactl list short sinks | grep -q "^[0-9]*\s$n\s" || pactl load-module module-null-sink sink_name=$n sink_properties=device.description=$n >> /tmp/buddy-testmods
   done
-  sed -e 's/^headset_sink .*/headset_sink = "buddy_test_null"/' -e 's/^ps5_mic_sink .*/ps5_mic_sink = "buddy_test_null"/' \
+  sed -e '1i chat_url = ""' -e 's/^headset_sink .*/headset_sink = "buddy_test_null"/' -e 's/^ps5_mic_sink .*/ps5_mic_sink = "buddy_test_null"/' \
       -e 's/^mic_source .*/mic_source = "wake_test_mic.monitor"/' \
       -e 's/^squad_source .*//' -e 's/^\[wake\]/[wake]\nsquad_source = "wake_test_squad.monitor"/' $C/buddy.toml > $C/test.toml
   mkdir -p $D; printf '[Service]\nEnvironment=BUDDY_CONFIG=%%h/.config/psaudio-buddy/test.toml\nEnvironment=BUDDY_DEBUG=1\n' > $D/test.conf

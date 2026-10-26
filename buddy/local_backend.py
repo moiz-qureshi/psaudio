@@ -24,6 +24,8 @@ import wave
 from types import SimpleNamespace as NS
 
 import httpx
+
+import loadout
 import numpy as np
 
 log = logging.getLogger("buddy")
@@ -67,7 +69,64 @@ EXPLICIT = re.compile(
     r"\b(look(?:ing)?\s+(?:it|that|this|them|him|her|\w+)?\s*up|look\s+(?:in|into|at)\s+(?:the\s+)?(?:app|crcmz|data|stats)|"
     r"check\s+(?:the\s+|your\s+)?(?:app|crcmz|stats?|data|leaderboard|records?|tools?|whatsapp|chat|trip)|"
     r"use\s+(?:your\s+|the\s+)?(?:tools?|app|data|mcp)|pull\s+(?:it\s+|that\s+|up|\w+\s+up)|"
-    r"search|crcmz|in\s+the\s+app|from\s+the\s+app|find\s+out|look\s+through|dig\s+(?:up|through|into))\b", re.I)
+    r"search\s+(?:the\s+|your\s+)?(?:app|crcmz|chat|whatsapp|data)|crcmz|in\s+the\s+app|from\s+the\s+app|"
+    r"us(?:e|ing)\s+(?:the\s+|your\s+)?(?:app|crcmz|data|tools?)|"
+    r"look\s+through|dig\s+(?:up|through|into))\b", re.I)
+ROAST_Q = re.compile(r"\broast", re.I)
+# "what happened?" & co: look back over the last ~15 s of the PS5 screen before answering
+RECAP_Q = re.compile(
+    r"\b(what\s+(?:just\s+)?happened|what\s+(?:am\s+i|was\s+i|is\s+he|was\s+he)\s+doing|what\s+was\s+that|"
+    r"what\s+did\s+(?:i|he|you\s+see)|did\s+you\s+(?:see|watch|catch)\s+(?:that|this|what|it|me)|you\s+see\s+that|"
+    r"how(?:\s+did|'d)\s+(?:i|he|that|we|it)\s+(?:do|go|play)|how\s+was\s+(?:that|my|i)|rate\s+(?:that|my|me)|"
+    r"watch\s+(?:that|this|me)|what\s*(?:'s|\s+is)\s+(?:going\s+on|happening)|look\s+at\s+(?:that|this|my|me))\b", re.I)
+# Whisper on laughter/noise can loop ("ahahahahah..." until it runs out of tokens): that is
+# both the nonsense question and the 5-20 s wait. Cap the decode and collapse the loops.
+CHAR_LOOP = re.compile(r"([a-z]{1,6}?)\1{3,}", re.I)                       # "ahahahahah"
+WORD_LOOP = re.compile(r"\b((?:\S+\s+){0,3}?\S+)(?:[\s,.!?]+\1\b){3,}", re.I)  # "go go go go go"
+LAUGH_ONLY = re.compile(r"^[\s.,!?~-]*(?:(?:a?h+a+h*|h+e+h*|h+i+h*|lo+l|lmf?ao+|a+h+|u+h+|u+m+|h+m+|m+h*m+|o+h+)"
+                        r"[\s.,!?~-]*)+$", re.I)
+
+
+def clean_transcript(text):
+    """Collapse Whisper's repeat loops; '' if nothing but laughter / filler sounds is left."""
+    text = " ".join(WORD_LOOP.sub(r"\1", CHAR_LOOP.sub(r"\1\1", text)).split())
+    if LAUGH_ONLY.match(text):
+        return ""
+    words = [w for w in text.split() if len(w.strip(".,!?~-")) < 4 or not LAUGH_ONLY.match(w)]
+    return " ".join(words)            # laughter tacked onto a real question goes too
+
+
+class StartGate:
+    """When to start playing a streamed take so it doesn't run dry mid-line. Normally after
+    JITTER_S; when the voice is coming out slower than real time (the Mac's GPU is busy) it
+    waits until what's buffered covers the rest of the line at the measured speed."""
+    CHARS_PER_S = 15                       # this voice speaks ~15-17 characters a second
+    MAX_WAIT_S = 3.0                       # never sit on more than this much audio
+
+    def __init__(self, text):
+        self.est = max(0.8, len(text) / self.CHARS_PER_S)
+        self.t_first, self.h_first = None, 0.0
+
+    def ready(self, held_bytes):
+        have = held_bytes / (OUT_RATE * 2)
+        now = time.monotonic()
+        if self.t_first is None:
+            self.t_first, self.h_first = now, have
+        if have < JITTER_S:
+            return False
+        if have >= self.MAX_WAIT_S or have >= self.est:
+            return True
+        if now - self.t_first < 0.2:                      # too early to tell how fast it's coming
+            return False
+        rate = (have - self.h_first) / (now - self.t_first)   # seconds of audio per second, so far
+        if rate >= 1.0:
+            return True
+        return have >= (self.est - have) * (1 / rate - 1)
+
+
+def stt_cap(pcm):
+    """Whisper token budget for a clip (speech is ~3 words/s), so a looping decode stops early."""
+    return int(len(pcm) / (IN_RATE * 2) * 8) + 24
 BANTER_HINT = (" Right now you are just talking: you can't look anything up this turn. Never make "
                "up stats, numbers, scores, dates or results. If someone wants real stats or squad "
                "history, tell them to ask you to look it up.")
@@ -354,8 +413,12 @@ def _wav_to_pcm24k(data):
 
 class LocalSession:
     def __init__(self, cfg, profile, history, on_stage, mcp=None, tools=None, on_tool=None, may_write=None,
-                 tool_hint="", context_fn=None):
+                 tool_hint="", context_fn=None, recap_fn=None, on_recap=None, game_fn=None):
         self.cfg, self.p = cfg, profile
+        self.loadouts = loadout.Loadouts()  # "what's the meta class?" -> wzmeta API, read out as-is
+        self.game_fn = game_fn            # the game on the PS5 screen right now (scene watcher), or ""
+        self.recap_fn = recap_fn          # last ~15 s of the PS5 screen, described (scene watcher)
+        self.on_recap = on_recap          # buddy plays a pre-rendered "lemme run that back"
         self.context_fn = context_fn      # squad mode: what was just said in the party
         self.tool_hint = tool_hint        # tool instructions: added to the prompt on lookup turns only
         self.on_tool = on_tool            # buddy plays a pre-rendered "let me look that up"
@@ -364,6 +427,7 @@ class LocalSession:
         self.tool_vecs = None             # embeddings of the tool descriptions, for routing
         self.prefetch = []                # no-argument tools the router is sure about
         self.vocab = "Hasaan"             # names Whisper should expect (squad, gamertags, trip)
+        self.facts, self.people = [], []  # saved facts + each person's names, cached with the vocab
         self.vocab_t = 0.0
         self.names = []                   # every known person name/alias, for fixing lookups
         self.mcp = mcp                    # crcmz MCP client (read-only tools), or None
@@ -409,21 +473,22 @@ class LocalSession:
         if not self.mcp or time.monotonic() - self.vocab_t < 1800:
             return
         self.vocab_t = time.monotonic()
-        names = []
+        names, people = [], []
         try:
             r = json.loads(await self.mcp.call("squad_roster", {}))
             for person in r.get("people", []):
-                for k in ("name", "username", "psn_id", "mm_username"):
-                    if person.get(k):
-                        names.append(str(person[k]))
-                names += [str(n) for n in (person.get("whatsapp_names") or [])][:2]
+                aka = [str(person[k]) for k in ("name", "username", "psn_id", "mm_username") if person.get(k)]
+                aka += [str(n) for n in (person.get("whatsapp_names") or [])][:2]
+                names += aka
+                people.append({a.lower() for a in aka if len(a) >= 3})
             for u in r.get("untagged") or []:              # people not linked to an account yet
                 names.append(str(u.get("name") if isinstance(u, dict) else u))
         except Exception as e:
             log.warning("squad names for Whisper unavailable: %s", e)
         try:                                               # who the saved facts are about
             f = json.loads(await self.mcp.call("squad_facts", {"limit": 100}))
-            names += [str(x.get("about")) for x in f.get("facts", []) if x.get("about")]
+            self.facts = [x for x in f.get("facts", []) if x.get("about") and x.get("fact")]
+            names += [str(x.get("about")) for x in self.facts]
         except Exception:
             pass
         try:
@@ -438,8 +503,22 @@ class LocalSession:
                 seen.add(n.lower())
                 out.append(n)
         self.names = out
+        self.people = people or self.people
         self.vocab = ", ".join(["Hasaan"] + out)[:700]
         log.info("Whisper hint: %d squad names", len(out))
+
+    def _known_facts(self, text):
+        """Roasts: the saved facts already cached here about whoever is named, so a roast
+        gets real material with no lookup (and no wait)."""
+        low = text.lower()
+        said = lambda a: re.search(r"\b" + re.escape(a) + r"\b", low)
+        aka = set().union(*[p for p in self.people if any(said(a) for a in p)] or [set()])
+        hits = [f for f in self.facts if str(f["about"]).lower() in aka or said(str(f["about"]).lower())]
+        if not hits:
+            return None
+        lines = "\n".join(f"- {f['about']}: {f['fact']}" for f in hits[:12])
+        return ("(What you already know about them, saved by the squad. Use it for the roast; "
+                "call them by their gamertag:)\n" + lines[:1500])
 
     async def _people_lookup(self, text):
         """'Who is X' / 'fact about X': look X up here, before the model starts, so
@@ -566,6 +645,37 @@ class LocalSession:
             if t:
                 t.cancel()
         await self.client.aclose()
+        await self.loadouts.aclose()
+
+    async def _say(self, text):
+        """Speak text exactly as written (no model), in a few takes."""
+        q, take = asyncio.Queue(), ""
+        for s in re.split(r"(?<=[.!?])\s+", text.strip()):
+            if take and len(take) + len(s) > 220:
+                q.put_nowait(take)
+                take = ""
+            take = (take + " " + s).strip()
+        if take:
+            q.put_nowait(take)
+        q.put_nowait(None)
+        await self._speak(q)
+
+    async def _loadout_turn(self, text):
+        """Class questions and the slow read-out answer here; True if it did."""
+        said = self.loadouts.follow(text) if self.loadouts.active else None
+        if said is None:
+            try:
+                got = await self.loadouts.answer(text, self.game_fn() if self.game_fn else "")
+            except Exception as e:
+                log.warning("wzmeta lookup failed: %s %s", type(e).__name__, e)
+                got = ("Couldn't reach the meta site right now.", []) if loadout.CLASS_Q.search(text) else None
+            said = got[0] if got else None
+        if said is None:
+            return False
+        self.on_stage("loadout_ms")
+        await self._say(said)
+        self.history.append((text, said))
+        return True
 
     def _messages(self, text, lookup=False):
         system = self.cfg["system_instruction"] + (self.tool_hint if lookup else BANTER_HINT) + (
@@ -648,13 +758,19 @@ class LocalSession:
         with wave.open(buf, "wb") as w:
             w.setnchannels(1); w.setsampwidth(2); w.setframerate(IN_RATE); w.writeframes(pcm)
         # a fixed language + plain text skips detection and segment output (~0.25 s)
-        form = {"model": self.p["stt"], "response_format": "text",
+        form = {"model": self.p["stt"], "response_format": "text", "max_tokens": str(stt_cap(pcm)),
                 "prompt": f"Gaming squad voice chat. Names: {self.vocab}."}
         if self.p.get("language"):
             form["language"] = self.p["language"]
         t = time.monotonic()
-        r = await self.client.post(self.base + "/audio/transcriptions",
-                                   files={"file": ("q.wav", buf.getvalue(), "audio/wav")}, data=form)
+        try:
+            r = await asyncio.wait_for(self.client.post(
+                self.base + "/audio/transcriptions",
+                files={"file": ("q.wav", buf.getvalue(), "audio/wav")}, data=form),
+                timeout=4 + len(pcm) / (IN_RATE * 2) * 0.5)
+        except asyncio.TimeoutError:
+            log.info("local stt too slow (%.1f s audio): dropped", len(pcm) / (IN_RATE * 2))
+            return
         if os.environ.get("BUDDY_DEBUG"):
             log.info("local stt %.0f ms for %.1f s audio", (time.monotonic() - t) * 1000, len(pcm) / (IN_RATE * 2))
         r.raise_for_status()
@@ -665,12 +781,17 @@ class LocalSession:
             except ValueError:
                 pass
         self.on_stage("stt_done_ms")
+        text = clean_transcript(text)
         if not text or re.fullmatch(r"[\s.,!?]*(thank you|thanks for watching|you)?[\s.,!?]*", text, re.I):
             return                               # silence or Whisper's usual silence hallucinations
         await self.out.put(_msg(input_transcription=NS(text=text)))
 
         roast = self.turn_mode.get("mode") == "roast"
-        lookup = bool(self.mcp) and not roast and bool(EXPLICIT.search(text) or PERSON_Q.search(text))
+        if not roast and await self._loadout_turn(text):
+            return
+        # tools only when they ask for them ("use your tools", "look it up", "check the app");
+        # "who is X" / "roast X" are answered from what it already knows
+        lookup = bool(self.mcp) and not roast and bool(EXPLICIT.search(text))
         if lookup and self.on_tool:
             self.on_tool()                          # "hold up, checking" right away, not after routing
         self.on_stage("lookup_turn_ms" if lookup else "chat_turn_ms")
@@ -684,6 +805,24 @@ class LocalSession:
             msgs = self._messages(text, lookup)
             if people_ctx:
                 msgs.insert(-1, {"role": "system", "content": people_ctx})
+        me = self.cfg.get("owner_gamertag") or "Moiz"
+        if self.turn_mode.get("source") == "squad":        # "Hey Hasaan" came from the party audio
+            who = (f"(This came from the party chat: one of {me}'s friends asked, not {me}. You can't "
+                   "tell which friend unless they say their name or it's obvious from what they said, so "
+                   "don't guess a gamertag: just talk to them as 'you'.)")
+        else:
+            who = f"({me} asked this on his headset. Talk to him as 'you'; don't say his name.)"
+        msgs.insert(-1, {"role": "system", "content": who})
+        known = self._known_facts(text) if (roast or ROAST_Q.search(text)) and not lookup else None
+        if known:
+            msgs.insert(-1, {"role": "system", "content": known})
+        if not roast and self.recap_fn and RECAP_Q.search(text):
+            if self.on_recap:
+                self.on_recap()                      # covers the ~3.5 s look back
+            self.on_stage("recap_turn_ms")
+            seen = await self.recap_fn()
+            self.on_stage("recap_ms")
+            msgs.insert(-1, {"role": "system", "content": seen})
 
         sentences = asyncio.Queue()
         speaker = asyncio.create_task(self._speak(sentences))
@@ -861,17 +1000,19 @@ class LocalSession:
             s = re.sub(r"[*_#`~>]+", "", s).strip()
             if not s:
                 continue
+            # text first: the deck panel and the PS5 chat overlay show it while it's spoken
+            await self.out.put(_msg(output_transcription=NS(text=(" " + s))))
             if self.p["tts_provider"] == "macos":
                 stream = self._one_shot(s)
             else:
                 stream = self._tts_stream(s)
-            held, started = bytearray(), False
+            held, started, gate = bytearray(), False, StartGate(s)
             async for pcm in stream:
                 if started:
                     await self._play(pcm)
                     continue
                 held += pcm
-                if len(held) >= OUT_RATE * 2 * JITTER_S:
+                if gate.ready(len(held)):
                     started = True
                     if first:
                         self.on_stage("tts_first_ms")
@@ -882,7 +1023,6 @@ class LocalSession:
                     self.on_stage("tts_first_ms")
                     first = False
                 await self._play(bytes(held))
-            await self.out.put(_msg(output_transcription=NS(text=(" " + s))))
 
     async def _play(self, pcm):
         step = OUT_RATE * 2 // 10                               # hand over in 100 ms pieces

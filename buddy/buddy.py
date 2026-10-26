@@ -85,6 +85,12 @@ DEFAULTS = {
     "listen": "0.0.0.0",
     "port": 8766,
     "allow": ["127.0.0.1", "::1", "192.168.5.54"],
+    # what Hasaan calls everyone (never real names); the owner is the headset-mic / deck user
+    "squad_gamertags": ["TheMooseCompany", "InterestingSoup", "Deception", "Ace", "Kaptaan", "Asamad89"],
+    "owner_gamertag": "InterestingSoup",
+    # hasaan-chat on opti3: every reply also shows on the PS5's Twitch chat overlay as "Hasaan"
+    # (needs HASAAN_CHAT_TOKEN in secrets.env; "" = off)
+    "chat_url": "http://192.168.5.54:8897/hasaan/message",
     "wake": {
         "enabled": True,          # "Hey Hasaan" while AI SESSION is on
         "phrases": ["hey hassan", "hey hasan"],
@@ -172,6 +178,7 @@ def load_config():
     cfg["mac_voice_token"] = os.environ.get("MAC_VOICE_TOKEN", "").strip()
     cfg["crcmz_token"] = os.environ.get("CRCMZ_MCP_TOKEN", "").strip()
     cfg["ps5_stream_token"] = os.environ.get("PS5_STREAM_TOKEN", "").strip()
+    cfg["chat_token"] = os.environ.get("HASAAN_CHAT_TOKEN", "").strip()
     return cfg
 
 
@@ -527,6 +534,9 @@ class WakeDetector:
                 r.Reset()
                 free.Reset()
                 self.streak, after_words, spoke = 0, 0, False
+                if self.mode == "capture":             # started without a wake word (follow-up)
+                    floor = float(np.percentile(self.levels, 20)) if self.levels else 0.0
+                    thr, quiet = max(0.004, floor * 3.0), 0
                 continue
             x = np.frombuffer(item, dtype="<i2").astype(np.float32) / 32768.0
             rms = float(np.sqrt(np.mean(x * x)))
@@ -636,8 +646,73 @@ class Buddy:
         self.state, self.error = state, error
         self.seq += 1
         log.info("state %s%s", state, f" ({error})" if error else "")
+        self.kick_hold()
+        if state == "ready" and getattr(self, "follow_up", None) and not self.listening:
+            src, self.follow_up = self.follow_up, None
+            asyncio.create_task(self._follow_up(src))
+        elif state in ("listening", "off", "error"):
+            self.follow_up = None
         async with self.changed:
             self.changed.notify_all()
+
+    def kick_hold(self):
+        if self.busy_for_gpu() and not (getattr(self, "hold_task", None) and not self.hold_task.done()):
+            self.hold_task = asyncio.create_task(self._hold_scene())
+
+    async def scene_recap(self):
+        """What the last ~15 s of the PS5 screen showed (8 frames through the vision model on the
+        Mac, ~3.5 s), as a prompt note telling Hasaan to hype or roast it."""
+        import httpx
+        me = self.cfg.get("owner_gamertag") or "the player"
+        url = self.cfg["squad"].get("scene_url", "").rstrip("/")
+        d = {}
+        if url and self.cfg.get("ps5_stream_token"):
+            try:
+                async with httpx.AsyncClient(timeout=httpx.Timeout(12, connect=1)) as c:
+                    r = await c.post(url + "/recap", json={"me": me},
+                                     headers={"Authorization": f"Bearer {self.cfg['ps5_stream_token']}"})
+                    d = r.json()
+            except Exception as e:
+                log.warning("screen recap failed: %s %s", type(e).__name__, e)
+        if not d.get("ok"):
+            return (f"(You tried to look at {me}'s PS5 screen but there's no live picture right now "
+                    f"({d.get('why', 'not reachable')}). Say you can't see his screen at the moment.)")
+        log.info("screen recap (%s ms): %r", d.get("vision_ms"), d.get("text", "")[:160])
+        ev = "\nRecent events: " + "; ".join(d["events"]) if d.get("events") else ""
+        return (f"(You just watched the last {d.get('span_s', 15)} seconds of {me}'s PS5 screen. "
+                f"This is what you saw:)\n{d.get('text', '')}{ev}\n"
+                "(React out loud like a friend who was watching, talking straight to him as 'you' "
+                "(don't say his name): if he did something good, hype him up; if he messed up, died, "
+                "whiffed or is just sitting in a menu, roast him. One or two punchy sentences, specific "
+                "to what you saw. Don't invent anything that isn't in what you saw, and don't describe "
+                "the frames like a commentator.)")
+
+    def busy_for_gpu(self):
+        sq = getattr(self, "squad_mode", None)
+        return self.state in ("listening", "thinking", "speaking") or bool(sq and sq.speaking)
+
+    async def _hold_scene(self):
+        """While Hasaan listens/thinks/speaks, the Mac's scene watcher stops sending frames to
+        the vision model: sharing the GPU made the cloned voice ~4x slower (stutter + late
+        start). It keeps serving the facts it has. The hold expires on its own if we vanish."""
+        import httpx
+        url = self.cfg["squad"].get("scene_url", "").rstrip("/")
+        if not url or not self.cfg.get("ps5_stream_token"):
+            return
+        h = {"Authorization": f"Bearer {self.cfg['ps5_stream_token']}"}
+        async with httpx.AsyncClient(timeout=httpx.Timeout(1.5, connect=0.5)) as c:
+            async def post(s):
+                try:
+                    await c.post(url + "/hold", json={"s": s}, headers=h)
+                except Exception:
+                    pass
+            while self.busy_for_gpu():
+                await post(8)
+                for _ in range(30):                     # re-check every 0.1 s, renew every 3 s
+                    await asyncio.sleep(0.1)
+                    if not self.busy_for_gpu():
+                        break
+            await post(0)
 
     def bump(self):
         self.seq += 1
@@ -816,7 +891,7 @@ class Buddy:
     def _clip_texts(self):
         out = [self.ack_conf()["text"]] if self.ack_conf()["enabled"] else []
         if self.filler_conf()["enabled"]:
-            out += [l for l in self.filler_conf()["lines"] if l.strip()]
+            out += [l for l in self.filler_conf()["lines"] if l.strip()] + self.RECAP_FILLERS
         return out
 
     def prepare_ack(self, all_profiles=False):
@@ -891,13 +966,16 @@ class Buddy:
         except Exception as e:
             log.warning("clip %r not rendered for %s: %s", text, p["id"], str(e)[:160])
 
-    def play_filler(self):
-        """crcmz lookup started: say one filler line (once per question), through the
-        same player as replies so the answer follows it instead of overlapping."""
+    # "what happened?": said while the last 15 s of the screen are looked at
+    RECAP_FILLERS = ["Hold up, lemme run that back.", "Wait, lemme rewatch that.", "Hold on, lemme see."]
+
+    def play_filler(self, lines=None):
+        """crcmz lookup (or a screen recap) started: say one filler line (once per question),
+        through the same player as replies so the answer follows it instead of overlapping."""
         c = self.filler_conf()
         if not c["enabled"] or self.discard or self.turn is None or self.turn.get("filler"):
             return
-        lines = [l for l in c["lines"] if l.strip()]
+        lines = [l for l in (lines or c["lines"]) if l.strip()]
         if not lines:
             return
         self._filler_i = (getattr(self, "_filler_i", -1) + 1) % len(lines)
@@ -915,6 +993,21 @@ class Buddy:
     def personality(self):
         return (self.profiles.data.get("personality") or "").strip() or PERSONALITY
 
+    def names_hint(self):
+        tags = self.cfg.get("squad_gamertags") or []
+        if not tags:
+            return ""
+        me = self.cfg.get("owner_gamertag") or tags[0]
+        return (f" The squad, by gamertag: {', '.join(tags)}. {me} runs you (the headset mic and "
+                "the deck are his). Talk to whoever is talking to you as 'you': don't open lines with "
+                "their name or keep repeating it, a name now and then at most. When you mention "
+                "someone else, use their gamertag, never a real name, even when a tool result or the "
+                "transcript shows a real name: say the gamertag it belongs to instead.")
+
+    def system_prompt(self):
+        """Personality (editable on Deck Manager) + the squad's gamertags."""
+        return self.personality() + self.names_hint()
+
     def tool_hints(self):
         """What the model is told about its tools, including that it can't send
         anything when no write tool is on (it once claimed to have sent a message)."""
@@ -927,7 +1020,7 @@ class Buddy:
 
     def live_config(self):
         hint = self.tool_hints()
-        c = dict(self.cfg, voice=self.profile["voice"], system_instruction=self.personality() + hint)
+        c = dict(self.cfg, voice=self.profile["voice"], system_instruction=self.system_prompt() + hint)
         extra = {}
         if self.live_tools:
             extra["tools"] = [types.Tool(function_declarations=mcp_client.gemini_declarations(self.live_tools))]
@@ -1037,11 +1130,15 @@ class Buddy:
         p = self.profile
         if p["kind"] == "local":
             hint = self.tool_hints()
-            return local_backend.LocalSession(dict(self.cfg, system_instruction=self.personality()),
+            return local_backend.LocalSession(dict(self.cfg, system_instruction=self.system_prompt()),
                                               p, self.local_history, self._stage,
                                               mcp=self.mcp if self.live_tools else None, tools=self.live_tools,
                                               on_tool=self.play_filler, may_write=self.may_write, tool_hint=hint,
-                                              context_fn=self.squad_mode.recent_chat)
+                                              context_fn=self.squad_mode.recent_chat,
+                                              recap_fn=self.scene_recap,
+                                              on_recap=lambda: self.play_filler(self.RECAP_FILLERS),
+                                              game_fn=lambda: str(((self.squad_mode.scene or {}).get("now")
+                                                                   or {}).get("game") or ""))
         return client.aio.live.connect(model=p["model"], config=self.live_config())
 
     async def _session_loop(self):
@@ -1179,6 +1276,7 @@ class Buddy:
         if sc.output_transcription and sc.output_transcription.text and not self.discard:
             self.reply += sc.output_transcription.text
             self.bump()
+            self._chat_flush()
         if os.environ.get("BUDDY_DEBUG"):
             log.info("rx %s", {k: bool(getattr(sc, k)) for k in (
                 "model_turn", "turn_complete", "interrupted", "generation_complete",
@@ -1199,6 +1297,11 @@ class Buddy:
                 self.turn["question"] = self.question[-300:]
                 self.turn["reply"] = self.reply[-500:]
                 self._log_turn()
+            self._chat_flush(final=True)
+            src = (self.turn or {}).get("source")
+            # Hasaan asked something ("want me to go slow?", "got it?"): listen for the answer
+            self.follow_up = src if (src in ("mic", "squad") and self.reply.strip().endswith("?")
+                                     and not (self.turn or {}).get("test")) else None
             if getattr(sc, "error", None):
                 await self.set_state("error", sc.error)       # visible on the key + strip toast
                 return
@@ -1206,6 +1309,62 @@ class Buddy:
                 await self.set_state("ready" if self.armed or self.session_on else "off")
             if self.state == "thinking":   # finished without any audio
                 await self.set_state("ready" if self.armed or self.session_on else "off")
+
+    def _chat_flush(self, final=False):
+        """Post the reply to the chat overlay sentence by sentence, as soon as each is complete
+        (the first one may break early at a clause), so the text shows while it's being said."""
+        if self.turn and self.turn.get("test"):
+            return
+        pos = getattr(self, "chat_pos", 0)
+        pos = pos if pos <= len(self.reply) else 0
+        pending = self.reply[pos:]
+        if final:
+            if pending.strip():
+                self.to_chat(pending)
+            self.chat_pos = len(self.reply)
+            return
+        probe = pending + " " if re.search(r"[.!?…][\"')\]]*$", pending) else pending
+        while True:
+            chunk, rest = local_backend.split_ready(probe, first=pos == 0)
+            if not chunk:
+                break
+            self.to_chat(chunk)
+            used = len(probe) - len(rest)
+            pos += min(used, len(pending))
+            pending, probe = pending[used:], rest
+        self.chat_pos = pos
+
+    def to_chat(self, text):
+        """Queue a line for hasaan-chat (PS5 chat overlay). Never blocks or fails a turn: with
+        no broadcast running the server just has nobody to show it to, and if hasaan-chat is
+        down the line is dropped (one warning per outage)."""
+        text = text.strip()
+        if not (text and self.cfg.get("chat_url") and self.cfg.get("chat_token")):
+            return
+        if getattr(self, "chat_q", None) is None:
+            self.chat_q = asyncio.Queue(maxsize=20)
+            asyncio.create_task(self._chat_sender())
+        try:
+            self.chat_q.put_nowait(text)
+        except asyncio.QueueFull:
+            pass                       # hasaan-chat is stuck; don't pile up stale lines
+
+    async def _chat_sender(self):
+        """One sender so lines arrive in order."""
+        import httpx
+        failing = False
+        async with httpx.AsyncClient(timeout=httpx.Timeout(3, connect=1)) as c:
+            while True:
+                text = await self.chat_q.get()
+                try:
+                    r = await c.post(self.cfg["chat_url"], json={"message": text},
+                                     headers={"Authorization": f"Bearer {self.cfg['chat_token']}"})
+                    r.raise_for_status()
+                    failing = False
+                except Exception as e:
+                    if not failing:
+                        log.warning("chat overlay post failed (reply still spoken): %s", e)
+                    failing = True
 
     def _audio_in(self, data):
         t = self.turn
@@ -1300,7 +1459,7 @@ class Buddy:
             await self.arm()
             if not self.armed:
                 return
-        self.question, self.reply = "", ""
+        self.question, self.reply, self.chat_pos = "", "", 0
         self.turn = {"press_ms": client_ms or now_ms(), "press_rx_ms": now_ms(),
                      "model": self.model_name(), "profile": self.profile["id"],
                      "connected_at_press": self.session_ready.is_set()}
@@ -1362,7 +1521,7 @@ class Buddy:
         if submit and self.listen_bytes:
             mode = getattr(self, "listen_mode", "")
             self._queue(("end", {"mode": mode, "directive": roast_directive((self.turn or {}).get("roast_line"))
-                                 if mode == "roast" else ""}))
+                                 if mode == "roast" else "", "source": (self.turn or {}).get("source", "mic")}))
             self.activity_open = False
             self.gen_active = True
             self.usage.add_turn(self.listen_bytes / (IN_RATE * 2),
@@ -1452,6 +1611,30 @@ class Buddy:
                 if self.wake_handle:
                     self.wake_handle.cancel()
                 await self.end_listen()
+
+    async def _follow_up(self, src):
+        """Open the mic again after a question, end-pointed like a wake-word question."""
+        await asyncio.sleep(0.3)                       # let the last word leave the speakers
+        d = self.detectors.get(src)
+        if d is None or self.listening or not self.armed or self.state != "ready":
+            return
+        if src == "mic" and await self._mic_muted():
+            return                                     # muted on purpose: don't flag an error
+        await self.start_listen(source=src, wake=True)
+        if not self.listening:
+            return
+        d.capture()
+        log.info("follow-up: listening on %s", src)
+        if self.wake_handle:
+            self.wake_handle.cancel()
+        self.wake_handle = asyncio.get_running_loop().call_later(
+            self.cfg["wake"].get("follow_up_timeout_s", 6), lambda: asyncio.create_task(self._follow_up_timeout(src)))
+
+    async def _follow_up_timeout(self, name):
+        if self.listening and self.listen_source == name and self.turn is not None \
+                and not self.turn.get("heard_speech"):
+            log.info("follow-up (%s): no answer; stopped listening", name)
+            await self._end_listen(submit=False)
 
     async def _wake_timeout(self, name):
         if self.listening and self.listen_source == name and self.turn is not None \

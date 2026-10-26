@@ -51,6 +51,7 @@ SQUAD MODE: you are in the party voice chat right now, always listening, like a 
 - You hear everyone. Transcript lines are labelled "Moiz" (your guy, he runs you) or "Squad" (the PS5 party audio: his teammates, mixed with game sound - bits of game dialogue or music can show up there, ignore those).
 - You can see Moiz's PS5 screen: "Screen" gives what's on it right now and what happened recently (deaths, kills, spectating, frozen picture).
 - Decide if a real friend in this party would say something RIGHT NOW. Talk when: someone talks to you or asks something you can answer; there's a funny moment, a death, a clutch, a win or a loss; someone's AFK or being spectated doing nothing (roast them, tell the squad); a dead-quiet stretch where a quick joke fits. Otherwise answer with exactly: PASS
+- Talk to people as "you". Don't start lines with someone's gamertag or keep repeating names; name someone only when you call out a specific person. "Squad" lines are his friends: you can't tell which one unless they say a name, so don't guess.
 - When you talk: one or two short sentences, casual party-chat talk, no narrating the screen like a commentator, never repeat something you already said, never read out these notes. Only use scores, names and numbers that the notes or transcript actually show.
 - You do hear the party and see the screen in this mode; ignore any earlier instruction that says you can't.
 """.strip()
@@ -264,10 +265,15 @@ class SquadMode:
             return       # the AI key / wake word owns this one: keep the Mac's GPU for its answer
         asyncio.create_task(self._transcribe(name, pcm, False))
 
+    @property
+    def me(self):
+        return self.b.cfg.get("owner_gamertag") or "Moiz"
+
     async def _transcribe(self, name, pcm, handled):
         self.stt_busy += 1
         try:
             form = {"model": self.p["stt"], "response_format": "verbose_json", "language": self.p.get("language") or "en",
+                    "max_tokens": str(local_backend.stt_cap(pcm)),
                     "prompt": "Gaming squad party chat. Hasaan is the AI. Names: "
                     + (getattr(self.b.session, "vocab", None) or "Hasaan")}
             r = await self.client.post(self.base + "/audio/transcriptions",
@@ -279,18 +285,19 @@ class SquadMode:
             return
         finally:
             self.stt_busy -= 1
-        segs = [s for s in d.get("segments") or [] if s.get("avg_logprob", 0) > -1.0
-                and s.get("compression_ratio", 1) < 2.4 and s.get("no_speech_prob", 0) < 0.6]
+        segs = [s for s in d.get("segments") or [] if (s.get("avg_logprob") or 0) > -1.0   # None when
+                and (s.get("compression_ratio") or 1) < 2.4 and (s.get("no_speech_prob") or 0) < 0.6]  # capped
         text = " ".join(s.get("text", "").strip() for s in segs).strip() if d.get("segments") else d.get("text", "").strip()
+        text = local_backend.clean_transcript(text)
         if not text or HALLUCINATION.match(text) or len(text) < 2:
             self.dropped.append({"who": name, "raw": (d.get("text") or "")[:120],
-                                 "seg": [(round(x.get("avg_logprob", 0), 2), round(x.get("no_speech_prob", 0), 2))
+                                 "seg": [(round(x.get("avg_logprob") or 0, 2), round(x.get("no_speech_prob") or 0, 2))
                                          for x in (d.get("segments") or [])][:4]})
             return
         if name == "squad" and self._echo(text):
             self.dropped.append({"who": name, "raw": text[:120], "seg": "echo of Hasaan"})
             return
-        who = "Moiz" if name == "mic" else "Squad"
+        who = self.me if name == "mic" else "Squad"
         self.lines.append((time.monotonic(), who, text, handled))
         self.stats["heard"] += 1
         if handled:
@@ -405,10 +412,10 @@ class SquadMode:
         }[reason]
         return "\n".join([
             "Party chat (oldest first):", *(talk or ["(nobody has said anything yet)"]), "",
-            "Screen (Moiz's PS5, watched live):", *(seen or
+            f"Screen ({self.me}'s PS5, watched live):", *(seen or
                 ["(no stream right now: you can't see the screen, so don't mention anything on it)"]),
-            (f"(picture frozen for {self.static_s}s; Moiz last spoke {moiz_quiet}s ago)" if self.live
-             else f"(Moiz last spoke {moiz_quiet}s ago)"), "",
+            (f"(picture frozen for {self.static_s}s; {self.me} last spoke {moiz_quiet}s ago)" if self.live
+             else f"({self.me} last spoke {moiz_quiet}s ago)"), "",
             "What you said recently:", *(mine or ["(nothing yet)"]), "",
             why, "Reply with your line (no PASS this time)." if "Don't PASS" in why
             else "Reply with your line, or exactly PASS."])
@@ -420,20 +427,23 @@ class SquadMode:
         froze = f"The picture hasn't moved for {self.static_s}s."
         who = (now.get("spectating") or "").strip() if now.get("screen") == "spectating" else ""
         if who and who.lower() not in ("player", "the", "a", "screen", "mode"):
-            return (f"{froze} Moiz is spectating {who}, who is just standing there: {who} is AFK. "
+            return (f"{froze} {self.me} is spectating {who}, who is just standing there: {who} is AFK. "
                     "Call it out to the squad and roast them for it now. Don't PASS.")
         if re.search(r"\b(loading|matchmaking|lobby|queue)\b", note, re.I):
             return f"{froze} It's a loading/lobby screen, so nobody's AFK. Only talk if it's been forever."
         if moiz_quiet > 60:
-            return (f"{froze} Moiz hasn't said a word for {moiz_quiet}s either: the jackass is AFK. "
+            return (f"{froze} {self.me} hasn't said a word for {moiz_quiet}s either: the jackass is AFK. "
                     "Tell the squad and roast him for it now. Don't PASS.")
-        return f"{froze} Moiz is still talking, so he's probably just in a menu. React only if it's funny."
+        return f"{froze} {self.me} is still talking, so he's probably just in a menu. React only if it's funny."
 
     async def _decide(self, reason, unprompted):
         self.deciding = True
         try:
-            system = self.b.personality() + "\n\n" + RULES
+            system = self.b.system_prompt() + "\n\n" + RULES.replace("Moiz", self.me)
             msgs = [{"role": "system", "content": system}, {"role": "user", "content": self._context(reason)}]
+            asked = next((t for _, who, t, _ in reversed(self.lines) if not who.startswith("Hasaan")), "")
+            if reason in ("addressed", "question") and local_backend.RECAP_Q.search(asked):
+                msgs.insert(1, {"role": "system", "content": await self.b.scene_recap()})   # "what happened?"
             r = await self.client.post(self.base + "/chat/completions", json={
                 "model": self.p["llm"], "messages": msgs, "max_tokens": 80,
                 "temperature": float(self.p.get("temperature", 0.9)),
@@ -469,12 +479,14 @@ class SquadMode:
         if not p or not self.client:
             return
         self.speaking, self.saying = True, text
+        self.b.kick_hold()                                     # scene watcher off the GPU while it talks
         self.b.question, self.b.reply = heard[-200:], text      # the deck's LAST REPLY panel
         self.b.bump()
         log.info("squad (%s): %r", why, text)
+        self.b.to_chat(text)
         pushed = 0
         try:
-            held, started = bytearray(), False
+            held, started, gate = bytearray(), False, local_backend.StartGate(text)
             async for pcm in local_backend.tts_stream(self.client, self.base, p, text):
                 if self.cutting or (not force and self._busy()):
                     break                              # STOP, or someone pressed the AI key
@@ -483,7 +495,7 @@ class SquadMode:
                     pushed += len(pcm)
                     continue
                 held += pcm
-                if len(held) >= OUT_RATE * 2 * local_backend.JITTER_S:
+                if gate.ready(len(held)):
                     started = True
                     self.b.player.push(bytes(held))
                     pushed += len(held)
@@ -510,7 +522,7 @@ class SquadMode:
         """'Hey Hasaan' and then nothing: in the party that means 'you there?' - answer it."""
         if not self.on:
             return
-        self.lines.append((time.monotonic(), "Moiz" if source == "mic" else "Squad", "Hey Hasaan?", False))
+        self.lines.append((time.monotonic(), self.me if source == "mic" else "Squad", "Hey Hasaan?", False))
         self._trigger("addressed")
 
     def recent_chat(self, seconds=90):
@@ -523,7 +535,7 @@ class SquadMode:
             return ""
         out = []
         if seen:
-            out.append("(You can see Moiz's PS5 screen live. Use it if they ask what's going on; don't "
+            out.append(f"(You can see {self.me}'s PS5 screen live. Use it if they ask what's going on; don't "
                        "invent anything that isn't here:\n" + "\n".join(seen) + ")")
         if rows:
             out.append("(Squad mode is on: you hear the party. Just said:\n" + "\n".join(rows) + ")")

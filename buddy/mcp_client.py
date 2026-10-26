@@ -207,8 +207,10 @@ NO_FILLER_SENTENCE = ("When you need to look something up, first say one short l
 TOOL_HINT = (" You can look things up in the squad's CRCMZ app (members, profiles, stats, "
              "leaderboards, PSN/Steam status, WhatsApp history, clips, tournaments, memories, and "
              "the Calgary trip: itinerary, stay, flights, who owes whom, packing, polls, food) "
-             "with your tools. Use them whenever someone asks about a squad member or squad "
-             "history, and use what you find to roast them properly. Call squad_roster first "
+             "with your tools. Use them ONLY when someone explicitly asks you to (\"use your "
+             "tools\", \"look it up\", \"check the app\"); otherwise, roasts included, answer "
+             "right away from what you already know. When asked, use what you find to roast "
+             "them properly. Call squad_roster first "
              "if you need to work out who a name refers to. Never read out phone numbers, "
              "addresses or private messages word for word; summarise and roast instead. "
              + FILLER_SENTENCE +

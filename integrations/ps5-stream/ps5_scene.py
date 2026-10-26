@@ -8,13 +8,19 @@ own, nonstop, so the picture is always fresh no matter what Hasaan is doing:
     spectating / menu ...), who's being spectated, kills, score, what just happened;
   - it turns changes into a timeline of events ("Moiz died", "got a kill (4)",
     "spectating xXJackXx") and keeps the last 15 minutes;
-  - GET /scene (bearer token) answers in a few ms with the current facts + timeline.
+  - GET /scene (bearer token) answers in a few ms with the current facts + timeline;
+  - it keeps the last 30 frames (2 a second = 15 s, shrunk, memory only) so POST /recap can
+    tell Hasaan what just happened when someone asks ("what happened?", "did you see that?").
 
 Python 3.9 stdlib only. Reads the frame file the PS5 Stream app writes; never stores images.
 """
 import base64
+import collections
 import json
+import os
 import re
+import subprocess
+import tempfile
 import threading
 import time
 import urllib.error
@@ -39,6 +45,12 @@ PROMPT = """Moiz's PS5 screen, live. Answer with ONE line of 6 fields separated 
 screen (playing, dead, killcam, spectating, menu, lobby, loading, scoreboard, map, paused, other) | gamertag being spectated | gamertag who killed Moiz | Moiz's kill count | match score like 6-5 | what just happened, 2-5 words
 Example: spectating | xXJackXx | - | 3 | 4-6 | teammate clutching
 Only what you can actually read on screen."""
+RING_N, RING_EVERY_S, RING_PX = 30, 0.5, 384   # last 15 s of frames, shrunk for a fast multi-image look
+RECAP_PICK = 8                                   # frames sent to the model, spread over those 15 s
+RECAP_PROMPT = ("These are {n} frames from the last {secs} seconds of a PS5 player's screen, oldest first. "
+                "The player is {me}. In 2-3 short factual sentences say what {me} did and how it went: "
+                "kills, deaths, who killed him, clutches, fails, wins or losses, anything funny or "
+                "embarrassing. If it's only menus, loading or a lobby, say that. Only what you can actually see.")
 GAME_PROMPT = "Which video game is this? Answer with just its name (1-5 words), or - if you can't tell."
 GAME_EVERY_S = 120
 SCORE_RE = re.compile(r"^\s*(\d{1,3})\s*[-:\u2013]\s*(\d{1,3})\s*$")
@@ -46,6 +58,89 @@ SCORE_RE = re.compile(r"^\s*(\d{1,3})\s*[-:\u2013]\s*(\d{1,3})\s*$")
 lock = threading.Lock()
 state = {"live": False, "static_s": 0, "now": None, "updated": 0.0, "frames": 0, "vision_ms": None}
 events = []          # (time, text)
+hold = {"until": 0.0}  # POST /hold: Hasaan is listening/thinking/speaking, leave the GPU to him
+ring = collections.deque(maxlen=RING_N)    # (time, small jpeg), memory only
+ANALYSIS_OFF = SUPPORT / "analysis_off"    # exists = SCREEN AI switched off on the deck (survives restarts)
+
+
+def analysis_on():
+    return not ANALYSIS_OFF.exists()
+
+
+def set_analysis(on):
+    if on:
+        if ANALYSIS_OFF.exists():
+            ANALYSIS_OFF.unlink()
+    else:
+        ANALYSIS_OFF.touch()
+        ring.clear()
+        with lock:
+            state["now"] = None                 # don't keep serving what it saw before
+    with lock:
+        add_event("screen analysis on" if on else "screen analysis off")
+    return analysis_on()
+SHRINK_DIR = tempfile.mkdtemp(prefix="ps5scene-")   # sips needs files: scratch, emptied each time
+
+
+def shrink(jpg):
+    a, b = os.path.join(SHRINK_DIR, "in.jpg"), os.path.join(SHRINK_DIR, "out.jpg")
+    try:
+        with open(a, "wb") as f:
+            f.write(jpg)
+        subprocess.run(["sips", "-Z", str(RING_PX), a, "--out", b], capture_output=True, timeout=5)
+        with open(b, "rb") as f:
+            return f.read()
+    finally:
+        for x in (a, b):
+            try:
+                os.remove(x)
+            except OSError:
+                pass
+
+
+def capture():
+    """Its own thread, so frames keep coming while the vision model is busy."""
+    last = None
+    while True:
+        time.sleep(RING_EVERY_S)
+        if not state["live"] or not analysis_on():
+            ring.clear()
+            continue
+        try:
+            m = FRAME.stat().st_mtime_ns
+            if m != last:
+                last = m
+                ring.append((time.time(), shrink(FRAME.read_bytes())))
+        except Exception:
+            pass
+
+
+def recap(me):
+    if not analysis_on():
+        return {"ok": False, "why": "screen analysis is switched off"}
+    frames = list(ring)
+    if len(frames) < 2:
+        return {"ok": False, "why": "no live picture"}
+    step = max(1, len(frames) // RECAP_PICK)
+    pick = frames[::-1][::step][:RECAP_PICK][::-1]          # newest always in, evenly back from it
+    secs = max(1, int(frames[-1][0] - frames[0][0]))
+    hold["until"] = max(hold["until"], time.time() + 15)    # the frame-by-frame describer waits
+    t = time.time()
+    content = [{"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + base64.b64encode(j).decode()}}
+               for _, j in pick]
+    content.append({"type": "text", "text": RECAP_PROMPT.format(n=len(pick), secs=secs, me=me)})
+    try:
+        r = http_json(OMLX, {"model": MODEL, "max_tokens": 90, "temperature": 0,
+                             "messages": [{"role": "user", "content": content}]},
+                      {"Authorization": "Bearer " + OMLX_KEY}, timeout=20)
+        text = (r["choices"][0]["message"]["content"] or "").strip()
+    finally:
+        hold["until"] = time.time() + 1
+    now = time.time()
+    with lock:
+        ev = [f"{int(now - et)}s ago: {e}" for et, e in events if e and now - et <= 60]
+    return {"ok": True, "text": text, "frames": len(pick), "span_s": secs, "events": ev[-10:],
+            "vision_ms": int((now - t) * 1000)}
 
 
 def http_json(url, body=None, headers=None, timeout=20):
@@ -170,7 +265,7 @@ def watch():
             if live and not state["live"]:
                 add_event("stream started")
             state["live"], state["static_s"] = live, static_s
-        if not live:
+        if not live or not analysis_on():
             continue
         for mark in (60, 180, 600):                       # frozen picture: AFK / paused / idle spectate
             if static_s >= mark and mark not in marks:
@@ -179,6 +274,8 @@ def watch():
                     add_event(f"picture frozen for {mark // 60} min" if mark >= 60 else "")
         if static_s < 5:
             marks.clear()
+        if time.time() < hold["until"]:
+            continue                                      # the facts we have stay served meanwhile
         gap = time.time() - last_desc
         moving = float(st.get("motion") or 0) > 0.012
         if gap < MIN_GAP_S or (not moving and gap < MAX_GAP_S):
@@ -224,7 +321,7 @@ def scene():
         return {"live": state["live"], "age_s": age, "static_s": state["static_s"], "now": cur or None,
                 "summary": " · ".join(bits) + (f" — {cur['event']}" if cur.get("event") else ""),
                 "events": [{"ago_s": int(now - t), "text": e} for t, e in events[-25:] if e],
-                "frames": state["frames"], "vision_ms": state["vision_ms"]}
+                "frames": state["frames"], "vision_ms": state["vision_ms"], "analysis": analysis_on()}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -235,7 +332,35 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(401, {"error": "token required"})
         if self.path.split("?")[0] == "/scene":
             return self.reply(200, scene())
+        if self.path.split("?")[0] == "/analysis":
+            return self.reply(200, {"enabled": analysis_on(), "live": state["live"]})
         self.reply(404, {"error": "not found"})
+
+    def do_POST(self):
+        if self.headers.get("Authorization") != "Bearer " + TOKEN:
+            return self.reply(401, {"error": "token required"})
+        path = self.path.split("?")[0]
+        if path not in ("/hold", "/recap", "/analysis"):
+            return self.reply(404, {"error": "not found"})
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+            body = json.loads(self.rfile.read(n) or b"{}")
+            if path == "/analysis":                  # {"set": "on" | "off" | "toggle"}: the deck's SCREEN AI key
+                want = str(body.get("set", "toggle")).lower()
+                if want not in ("on", "off", "toggle"):
+                    return self.reply(400, {"error": 'body: {"set": "on" | "off" | "toggle"}'})
+                on = (not analysis_on()) if want == "toggle" else want == "on"
+                return self.reply(200, {"enabled": set_analysis(on)})
+            if path == "/recap":                     # {"me": "gamertag"}: what just happened
+                try:
+                    return self.reply(200, recap(str(body.get("me") or "the player")[:32]))
+                except Exception as e:
+                    return self.reply(200, {"ok": False, "why": f"vision model: {type(e).__name__}"})
+            s = float(body.get("s", 0))
+        except (ValueError, AttributeError):
+            return self.reply(400, {"error": 'body: {"s": seconds}'})
+        hold["until"] = time.time() + max(0.0, min(s, 30.0))   # self-expiring: a lost "release" can't stall it
+        self.reply(200, {"ok": True, "held_s": max(0.0, min(s, 30.0))})
 
     def reply(self, code, obj):
         body = json.dumps(obj).encode()
@@ -251,4 +376,5 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     threading.Thread(target=watch, daemon=True).start()
+    threading.Thread(target=capture, daemon=True).start()
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()

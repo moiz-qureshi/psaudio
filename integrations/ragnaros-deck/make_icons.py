@@ -38,6 +38,14 @@ ICONS = {
     "aisquad_on":         ("SQUAD", "LISTENING", "squad", "violet", True, "violet"),
     "aisquad_watching":   ("SQUAD", "WATCHING", "eye", "violet", True, "green"),
     "aisquad_talking":    ("SQUAD", "TALKING", "bars", "green", True, "green"),
+    # stream page (profiles/streaming.yaml, bin/streamai)
+    "aianalysis":         ("SCREEN AI", "TOGGLE", "eye", "slate", False, None),
+    "aianalysis_on":      ("SCREEN AI", "ON", "eye", "cyan", True, "green"),
+    "aianalysis_off":     ("SCREEN AI", "OFF", "eye", "slate", False, None),
+    "aianalysis_offline": ("SCREEN AI", "NO MAC", "unlink", "red", True, None),
+    "aichat":             ("PS5 CHAT", "TOGGLE", "bot", "slate", False, None),
+    "aichat_hasaan":      ("PS5 CHAT", "HASAAN", "bot", "green", True, "green"),
+    "aichat_twitch":      ("PS5 CHAT", "TWITCH", "globe", "violet", True, None),
     # plain action keys
     "ui_studio":          ("LIGHT", "STUDIO", "bulb", "amber", True, None),
     "ui_hdmi":            ("TV INPUT", "HDMI", "hdmi", "violet", True, None),

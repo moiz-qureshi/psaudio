@@ -507,7 +507,7 @@ def game_id(name):
 
 
 def hud_profile(game):
-    return next(p for p in HUD_PROFILES if re.search(p["match"], (game or "").lower()))
+    return next((p for p in HUD_PROFILES if re.search(p["match"], (game or "").lower())), HUD_PROFILES[-1])
 
 
 def crop(jpg, box):
@@ -544,8 +544,22 @@ def stream_path():
         return None
 
 
+def forever(fn):
+    """Run a loop thread for good: a crash is logged and the loop starts again."""
+    def run():
+        while True:
+            try:
+                fn()
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                time.sleep(2)
+    return run
+
+
 def fullres():
     """Keep one ffmpeg writing frame_full.jpg (1080p, 2 fps) while live and analysis is on."""
+    subprocess.run(["pkill", "-f", "frame_full.jpg"], capture_output=True)    # left over from a restart
     while True:
         time.sleep(2)
         p = full["proc"]
@@ -771,6 +785,12 @@ def hud_loop():
     while True:
         time.sleep(0.5)
         scr = (state["now"] or {}).get("screen")
+        if hud_profile((state["now"] or {}).get("game"))["id"] == "cod" and OCR_BIN.exists():
+            pend = (matches["cur"] or {}).get("pending_death")
+            if pend and time.time() - pend["t"] > 8:
+                with lock:
+                    settle_death(cur_match())       # no kill-cam card read: count what the screen said
+            continue                                 # CoD: ocr_loop reads the HUD
         if (not state["live"] or not analysis_on() or time.time() < hold["until"]
                 or time.time() - last < HUD_EVERY_S or scr not in ("playing", "dead", "killcam", "spectating", "scoreboard")):
             continue
@@ -826,8 +846,6 @@ def hud_loop():
                 m = cur_match()
                 if mode and not m["mode"]:
                     m["mode"] = mode
-                elif mode and m["mode"] and mode.lower() != m["mode"].lower():
-                    m = new_match(game, mode)              # a different mode: a new match
                 if score and score != m["score"]:
                     if m["score"] and sum(map(int, score.split("-"))) < sum(map(int, m["score"].split("-"))) and \
                             score in ("0-0", "0-1", "1-0"):
@@ -838,6 +856,216 @@ def hud_loop():
                 save_matches()
         except Exception:
             continue
+
+
+# ---- OCR (Apple Vision, ps5ocr): CoD HUD text read off the full 1080p frame, once a second ----
+# The vision model can't read small HUD text (it made names up); Vision OCR reads the scoreboard,
+# kill-cam card, round banners and the score exactly, in ~0.4 s, off the GPU (Neural Engine).
+OCR_BIN = SUPPORT / "ps5ocr"
+OCR_EVERY_S = 1.0
+OCR_NUM = re.compile(r"^\D{0,2}?(\d{1,5})$")              # "45", "• 45", "A 18", "·42"
+OCR_BANNER = re.compile(r"^(ROUND (?:WIN|LOSS|WON|LOST)|VICTORY|DEFEAT|MATCH (?:WIN|LOSS))\b", re.I)
+ocr_state = {"t": 0.0, "ms": None, "error": None, "card_t": 0.0, "seen": None}
+
+
+def ocr(path):
+    r = subprocess.run([str(OCR_BIN), str(path)], capture_output=True, text=True, timeout=8)
+    return [o for o in json.loads(r.stdout or "[]") if o.get("conf", 0) >= 0.5 and o["text"].strip()]
+
+
+def ocr_cx(o):
+    return o["x"] + o["w"] / 2
+
+
+def ocr_num(o):
+    m = OCR_NUM.match(o["text"].strip())
+    return int(m.group(1)) if m else None
+
+
+def ocr_clean(t):
+    return re.sub(r"^[•·*\s]+", "", t).strip()
+
+
+def parse_board(items):
+    """MW-style scoreboard: SCOREBOARD tab, a table per side, the player card under it."""
+    if not any(o["text"].strip().upper() == "SCOREBOARD" and o["y"] < 0.12 for o in items):
+        return None
+    heads = [o for o in items if 0.18 < o["y"] < 0.4 and o["text"].strip().upper() in
+             ("#", "LEVEL", "PLAYER", "SCORE", "KILLS", "DEATHS", "CAPTURES", "PLANTS", "DEFUSES", "ASSISTS",
+              "OBJECTIVE", "TIME", "CONFIRMS", "DENIES", "STREAK", "HILL", "K/D")]
+    out = {"rows": [], "teams": None, "banner": None, "me": None, "mode": None, "map": None}
+    for side, (lo, hi) in (("us", (0.0, 0.5)), ("them", (0.5, 1.0))):
+        cols = sorted([h for h in heads if lo <= ocr_cx(h) < hi], key=ocr_cx)
+        names = {h["text"].strip().upper(): ocr_cx(h) for h in cols}
+        if "PLAYER" not in names or "KILLS" not in names:
+            continue
+        hy = max(h["y"] for h in cols)
+        after = [h for h in cols if ocr_cx(h) > names["KILLS"]]
+        extra_name = after[0]["text"].strip().upper() if after else None
+        body = [o for o in items if lo <= ocr_cx(o) < hi and hy + 0.015 < o["y"] < 0.8]
+        rows = {}
+        for o in body:
+            rows.setdefault(round(o["y"] / 0.02), []).append(o)
+        for _, cells in sorted(rows.items()):
+            nm = [c for c in cells if re.search(r"[A-Za-z]{2}", c["text"]) and
+                  names["PLAYER"] - 0.03 <= c["x"] <= names.get("SCORE", names["KILLS"]) - 0.02]
+            if not nm:
+                continue
+            raw = ocr_clean(nm[0]["text"])
+            if "#" in names:
+                raw = re.sub(r"^\d{1,2}\s+(?=\S)", "", raw)   # the rank column ran into the name
+
+            def col(label):
+                if label not in names:
+                    return None
+                best = [c for c in cells if ocr_num(c) is not None and abs(ocr_cx(c) - names[label]) < 0.05]
+                return ocr_num(min(best, key=lambda c: abs(ocr_cx(c) - names[label]))) if best else None
+            out["rows"].append({"team": side, "name": clean_name(raw), "score": col("SCORE"), "kills": col("KILLS"),
+                                "deaths": col("DEATHS"), "extra": col(extra_name) if extra_name else None,
+                                "extra_name": extra_name, "me": is_me(raw), "squad": is_mate(raw)})
+    card = {}
+    for lab in ("ELIMINATIONS", "DEATHS", "ELIM/D RATIO", "K/D RATIO", "KILLS"):
+        L = next((o for o in items if o["text"].strip().upper() == lab and o["y"] > 0.75), None)
+        if L:
+            below = [o for o in items if L["y"] + 0.01 < o["y"] < L["y"] + 0.08 and abs(ocr_cx(o) - ocr_cx(L)) < 0.05
+                     and re.fullmatch(r"\d+(?:\.\d+)?", o["text"].strip())]
+            if below:
+                card[lab] = below[0]["text"].strip()
+    mine = next((r for r in out["rows"] if r["me"]), None)
+    kills = card.get("ELIMINATIONS") or card.get("KILLS") or (mine or {}).get("kills")
+    if card.get("DEATHS") is not None and kills is not None:
+        out["me"] = {"kills": int(kills), "deaths": int(card["DEATHS"]),
+                     "ratio": card.get("ELIM/D RATIO") or card.get("K/D RATIO")}
+    top = [o for o in items if o["y"] < 0.13 and o["x"] > 0.7 and re.search(r"[A-Z]{3}", o["text"])]
+    if top:
+        out["mode"] = top[0]["text"].strip()
+        if len(top) > 1:
+            out["map"] = top[1]["text"].strip()
+    big = [o for o in items if 0.1 < o["y"] < 0.24 and 0.35 < ocr_cx(o) < 0.65 and ocr_num(o) is not None]
+    left = [o for o in big if ocr_cx(o) < 0.5]
+    right = [o for o in big if ocr_cx(o) >= 0.5]
+    if left and right:
+        out["teams"] = f"{ocr_num(left[0])}-{ocr_num(right[0])}"
+    return out
+
+
+def parse_card(items):
+    """Kill-cam card: KILLED BY <name>, KILLED WITH <weapon>, the build, a FINAL KILL banner."""
+    L = next((o for o in items if re.search(r"K?ILLED BY", o["text"], re.I) and o["y"] > 0.6), None)
+    if not L:
+        return None
+    who = [o for o in items if L["y"] < o["y"] < L["y"] + 0.07 and abs(o["x"] - L["x"]) < 0.12
+           and not re.search(r"ILLED", o["text"], re.I)]
+    card = {"KILLED BY": re.sub(r"\s*#\d+$", "", who[0]["text"]).strip() if who else None}
+    W = next((o for o in items if re.search(r"ILLED WITH", o["text"], re.I)), None)
+    if W:
+        gun = [o for o in items if o["y"] > W["y"] + 0.04 and abs(o["x"] - W["x"]) < 0.08 and re.search(r"[A-Z]{2}", o["text"])
+               and not re.search(r"RIFLE|SMG|SHOTGUN|PISTOL|LMG|LAUNCHER|MELEE|RUFLE", o["text"], re.I)]
+        card["KILLED WITH"] = gun[0]["text"].strip() if gun else None
+        card["BUILD"] = ", ".join(o["text"].strip() for o in items if o["x"] > 0.82 and W["y"] < o["y"] < 0.96
+                                  and not re.search(r"COPY BU", o["text"], re.I)) or None
+    ban = next((o for o in items if o["y"] < 0.07 and re.search(r"FINAL KILL|PLAY OF THE GAME", o["text"], re.I)), None)
+    card["BANNER"] = ban["text"].strip() if ban else None
+    return card
+
+
+def parse_banner(items):
+    b = next((o for o in items if o["y"] < 0.25 and OCR_BANNER.match(o["text"].strip())), None)
+    if not b:
+        return None
+    reason = next((o for o in items if b["y"] < o["y"] < b["y"] + 0.12 and abs(ocr_cx(o) - ocr_cx(b)) < 0.15
+                   and re.search(r"ELIMINATED|DETONATED|DEFUSED|TIME|CAPTURED|LIMIT", o["text"], re.I)), None)
+    return b["text"].strip() + (f" ({reason['text'].strip()})" if reason else "")
+
+
+def parse_top(items):
+    """Under the minimap: the mode name and the two team scores (top first)."""
+    mode = next((o["text"].strip() for o in items if o["x"] < 0.15 and 0.2 < o["y"] < 0.3
+                 and re.fullmatch(r"[A-Z][A-Z \-']{5,30}", o["text"].strip())), None)   # not team tags (UCTF)
+    nums = sorted([o for o in items if o["x"] < 0.06 and 0.24 < o["y"] < 0.42 and ocr_num(o) is not None],
+                  key=lambda o: o["y"])
+    score = f"{ocr_num(nums[0])}-{ocr_num(nums[1])}" if len(nums) >= 2 else None
+    return mode, score
+
+
+def parse_feed(items):
+    """Kill-feed lines (bottom-left, small, often blurred by the stream): only lines where his name
+    reads clearly count. Left name = killer, right name = victim."""
+    out = []
+    rows = {}
+    for o in items:
+        if o["x"] < 0.38 and 0.5 < o["y"] < 0.7 and re.search(r"[A-Za-z]{2}", o["text"]):
+            rows.setdefault(round(o["y"] / 0.02), []).append(o)
+    for _, cells in sorted(rows.items()):
+        cells.sort(key=lambda c: c["x"])
+        mine = [c for c in cells if is_me(ocr_clean(c["text"]))]
+        if not mine:
+            continue
+        others = [c for c in cells if c not in mine]
+        if mine[0]["x"] < 0.09:                          # his name starts the line: he got the kill
+            out.append((ocr_clean(mine[0]["text"]), ocr_clean(others[-1]["text"]) if others else "someone", None))
+        elif others:
+            out.append((ocr_clean(others[0]["text"]), ocr_clean(mine[0]["text"]), None))
+    return out
+
+
+def ocr_loop():
+    while True:
+        time.sleep(OCR_EVERY_S)
+        game = (state["now"] or {}).get("game")
+        if (not state["live"] or not analysis_on() or not OCR_BIN.exists() or hud_profile(game)["id"] != "cod"
+                or not FULL.exists() or time.time() - FULL.stat().st_mtime > 3):
+            continue
+        t = time.time()
+        try:
+            items = ocr(FULL)
+        except Exception as e:
+            ocr_state["error"] = f"{type(e).__name__}: {e}"[:120]
+            continue
+        ocr_state.update(t=time.time(), ms=int((time.time() - t) * 1000), error=None)
+        try:
+            with lock:
+                m = cur_match()
+                board = parse_board(items)
+                if board:
+                    ocr_state["seen"] = "scoreboard"
+                    if board["mode"]:
+                        m["mode"] = board["mode"]
+                    if board["map"]:
+                        m["map"] = board["map"]
+                    if board["me"]:                      # his card: exact, wins over counting
+                        m["kills"], m["deaths"] = board["me"]["kills"], board["me"]["deaths"]
+                    if board["teams"]:
+                        m["score"] = board["teams"]
+                    if len(board["rows"]) >= 4:
+                        board["t"] = time.time()
+                        m["scoreboard"] = board
+                    save_matches()
+                    continue
+                banner = parse_banner(items)
+                if banner:
+                    note_banner(m, banner)
+                card = parse_card(items)
+                if card and card.get("KILLED BY") and time.time() - ocr_state["card_t"] > 8:
+                    ocr_state["card_t"] = time.time()
+                    ocr_state["seen"] = "kill cam"
+                    m.setdefault("pending_death", {"t": time.time(), "by": None, "mate": False})
+                    settle_death(m, card)
+                mode, score = parse_top(items)
+                if mode and not m.get("mode"):
+                    m["mode"] = mode
+                if score and score != m["score"]:
+                    if m["score"] and score in ("0-0", "0-1", "1-0") and \
+                            sum(map(int, score.split("-"))) + 3 < sum(map(int, m["score"].split("-"))):
+                        m = new_match(game, m.get("mode"))   # scores back to zero: a new match
+                    m["score"] = score
+                    m["scores"].append((time.time(), score))
+                feed = parse_feed(items)
+                if feed:
+                    note_feed(m, feed)
+                save_matches()
+        except Exception as e:
+            ocr_state["error"] = f"parse {type(e).__name__}: {e}"[:120]
 
 
 def stats():
@@ -865,7 +1093,7 @@ def stats():
         return {"me": my_names(), "game": game, "live": state["live"], "analysis": analysis_on(),
                 "match": brief(m) if m else None,
                 "recent": [brief(x) for x in [y for y in matches["list"] if y["game"] == game and y is not m][-5:]],
-                "today": totals, "fullres": {"running": bool(full["proc"] and full["proc"].poll() is None),
+                "today": totals, "ocr": dict(ocr_state), "fullres": {"running": bool(full["proc"] and full["proc"].poll() is None),
                                              "error": full["error"]}}
 
 
@@ -945,10 +1173,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    threading.Thread(target=watch, daemon=True).start()
-    threading.Thread(target=capture, daemon=True).start()
-    threading.Thread(target=muse_loop, daemon=True).start()
     load_matches()
-    threading.Thread(target=fullres, daemon=True).start()
-    threading.Thread(target=hud_loop, daemon=True).start()
+    for loop in (watch, capture, muse_loop, fullres, hud_loop, ocr_loop):
+        threading.Thread(target=forever(loop), daemon=True, name=loop.__name__).start()
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()

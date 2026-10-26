@@ -5,6 +5,8 @@ set -euo pipefail
 cd "$(dirname "$0")"
 DEST="$HOME/Library/Application Support/PS5Stream/ps5_scene.py"
 cp ps5_scene.py "$DEST"
+# Vision OCR helper for the HUD (kill cams, scoreboard, banners): needs Xcode's command line tools
+swiftc -O ocr/ps5ocr.swift -o "$(dirname "$DEST")/ps5ocr"
 PL="$HOME/Library/LaunchAgents/me.crcmz.ps5scene.plist"
 cat > "$PL" <<PL
 <?xml version="1.0" encoding="UTF-8"?>

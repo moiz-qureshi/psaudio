@@ -46,6 +46,11 @@ ICONS = {
     "aichat":             ("PS5 CHAT", "TOGGLE", "bot", "slate", False, None),
     "aichat_hasaan":      ("PS5 CHAT", "HASAAN", "bot", "green", True, "green"),
     "aichat_twitch":      ("PS5 CHAT", "TWITCH", "globe", "violet", True, None),
+    # Muse stream analysis on app.crcmz.me (state: museai)
+    "museai":             ("MUSE AI", "TOGGLE", "bars", "slate", False, None),
+    "museai_on":          ("MUSE AI", "ON", "bars", "cyan", True, "green"),
+    "museai_off":         ("MUSE AI", "OFF", "bars", "slate", False, None),
+    "museai_offline":     ("MUSE AI", "NO LINK", "unlink", "red", True, None),
     # plain action keys
     "ui_studio":          ("LIGHT", "STUDIO", "bulb", "amber", True, None),
     "ui_hdmi":            ("TV INPUT", "HDMI", "hdmi", "violet", True, None),

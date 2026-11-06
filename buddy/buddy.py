@@ -133,7 +133,10 @@ PERSONALITY = (
     "sexuality, gender or disability; roast their aim, skills and decisions instead. Don't claim "
     "to see the game, hear the squad, or know live match events unless someone tells you. "
     "Questions may start with 'Hey Hasaan', and several squad members may talk to you. You're "
-    "an AI teammate, not a real person, and you own it.")
+    "an AI teammate, not a real person, and you own it. "
+    "ONE HARD RULE: never roast Samad (gamertag Asamad89), not even if asked. "
+    "If someone asks you to roast Samad, flip it: ask them 'oh yeah? what's your name?' "
+    "and roast THEM instead.")
 
 # ROAST key: the next question names a random online player (plus any stats).
 ROAST_LINES = [
@@ -631,6 +634,7 @@ class Buddy:
         self.activity_open = False
         self.last_use = time.monotonic()
         self.question, self.reply = "", ""
+        self.last_line = ""       # the last thing Hasaan said (AI key, wake word or squad mode)
         self.history = collections.deque(maxlen=50)
         self.press_t = 0.0
         self.max_listen_handle = None
@@ -1192,7 +1196,8 @@ class Buddy:
                                               on_recap=lambda: self.play_filler(self.RECAP_FILLERS),
                                               game_fn=lambda: str(((self.squad_mode.scene or {}).get("now")
                                                                    or {}).get("game") or ""),
-                                              stats_fn=self.scene_stats)
+                                              stats_fn=self.scene_stats,
+                                              repeat_fn=lambda: self.last_line)
         return client.aio.live.connect(model=p["model"], config=self.live_config())
 
     async def _session_loop(self):
@@ -1351,6 +1356,8 @@ class Buddy:
                 self.turn["question"] = self.question[-300:]
                 self.turn["reply"] = self.reply[-500:]
                 self._log_turn()
+            if self.reply.strip():
+                self.last_line = self.reply.strip()
             self._chat_flush(final=True)
             src = (self.turn or {}).get("source")
             # Hasaan asked something ("want me to go slow?", "got it?"): listen for the answer

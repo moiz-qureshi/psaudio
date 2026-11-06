@@ -643,6 +643,8 @@ class Buddy:
         self.game = {"volume": None, "muted": None}   # PS5 game audio -> headset (loopback stream)
         self.headset = {"volume": None, "muted": None}  # the A50 X sink: everything you hear
         self.squad_mode = squad_mode.SquadMode(self)     # SQUAD key: always-on party member
+        self._voice_buf: list[bytes] = []    # audio chunks buffered per-turn for voice ID
+        self._session_speaker: str | None = None   # identified speaker name (cached per session)
 
     # -- state -------------------------------------------------------------
     async def set_state(self, state, error=None):
@@ -1114,6 +1116,8 @@ class Buddy:
             await self.set_state("error", "no OMLX_API_KEY in secrets.env")
             return
         self.armed = True
+        self._session_speaker = None
+        self._voice_buf = []
         self.player.stop()
         await self.mic.start()
         self.session_task = asyncio.create_task(self._session_loop())
@@ -1486,6 +1490,7 @@ class Buddy:
         if self.listen_bytes >= self.cfg["max_listen_s"] * IN_RATE * 2:
             return True
         self.listen_bytes += len(chunk)
+        self._voice_buf.append(chunk)
         if self.held is not None:
             self.held.append(chunk)
         else:
@@ -1522,6 +1527,9 @@ class Buddy:
             if not self.armed:
                 return
         self.question, self.reply, self.chat_pos = "", "", 0
+        self._voice_buf = []
+        if self._session_speaker and self.profile["kind"] == "gemini":
+            self._queue(("text", f"[The person speaking is {self._session_speaker}]"))
         self.turn = {"press_ms": client_ms or now_ms(), "press_rx_ms": now_ms(),
                      "model": self.model_name(), "profile": self.profile["id"],
                      "connected_at_press": self.session_ready.is_set()}
@@ -1588,6 +1596,10 @@ class Buddy:
             self.gen_active = True
             self.usage.add_turn(self.listen_bytes / (IN_RATE * 2),
                                 test=bool(self.turn and self.turn.get("test")))
+            if self._voice_buf and self.profile["kind"] == "gemini":
+                pcm = b"".join(self._voice_buf)
+                self._voice_buf = []
+                asyncio.create_task(self._identify_speaker(pcm))
             await self.set_state("thinking")
             if not self.session_ready.is_set():
                 asyncio.create_task(self._connect_watchdog())
@@ -1606,6 +1618,41 @@ class Buddy:
         except asyncio.TimeoutError:
             if self.state == "thinking":
                 await self.set_state("error", self.error or "could not connect")
+
+    async def _identify_speaker(self, raw_pcm: bytes) -> None:
+        """POST buffered PCM to CRCMZ voice-ID endpoint; cache speaker name for the session."""
+        token = self.cfg.get("crcmz_token", "")
+        if not token:
+            return
+        base = self.mcp_conf()["url"].rstrip("/")
+        if base.endswith("/mcp"):
+            base = base[:-4]
+        url = f"{base}/api/voice/identify"
+        import io as _io
+        import wave as _wave
+        wav_buf = _io.BytesIO()
+        with _wave.open(wav_buf, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(IN_RATE)
+            w.writeframes(raw_pcm)
+        wav_bytes = wav_buf.getvalue()
+        import aiohttp as _aiohttp
+        try:
+            async with _aiohttp.ClientSession() as sess:
+                form = _aiohttp.FormData()
+                form.add_field("audio", wav_bytes, filename="voice.wav", content_type="audio/wav")
+                async with sess.post(url, data=form,
+                                     headers={"Authorization": f"Bearer {token}"},
+                                     timeout=_aiohttp.ClientTimeout(total=5)) as r:
+                    if r.status == 200:
+                        data = await r.json()
+                        name = data.get("name")
+                        if name and not self._session_speaker:
+                            self._session_speaker = name
+                            log.info("voice-id: identified %r (%.2f)", name, data.get("confidence", 0))
+        except Exception as e:
+            log.debug("voice-id: %s", e)
 
     async def press(self, client_ms=None, mode=""):
         self.press_t = time.monotonic()

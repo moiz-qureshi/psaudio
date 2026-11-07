@@ -1620,7 +1620,7 @@ class Buddy:
 
     async def _identify_speaker(self, raw_pcm: bytes) -> None:
         """POST buffered PCM to CRCMZ voice-ID endpoint; identify per turn (party has many speakers)."""
-        token = self.cfg.get("crcmz_token", "")
+        token = os.environ.get("CRCMZ_MACHINE_TOKEN", "").strip() or self.cfg.get("crcmz_token", "")
         if not token:
             return
         base = self.mcp_conf()["url"].rstrip("/")

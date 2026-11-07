@@ -1595,7 +1595,7 @@ class Buddy:
             self.gen_active = True
             self.usage.add_turn(self.listen_bytes / (IN_RATE * 2),
                                 test=bool(self.turn and self.turn.get("test")))
-            if self._voice_buf and self.profile["kind"] == "gemini":
+            if self._voice_buf:
                 pcm = b"".join(self._voice_buf)
                 self._voice_buf = []
                 asyncio.create_task(self._identify_speaker(pcm))
@@ -1650,7 +1650,7 @@ class Buddy:
                         if name:
                             self._session_speaker = name
                             log.info("voice-id: identified %r (%.2f)", name, data.get("confidence", 0))
-                            if self.profile["kind"] == "gemini" and self.gen_active:
+                            if self.gen_active:
                                 self._queue(("text", f"[The person speaking is {name}]"))
         except Exception as e:
             log.debug("voice-id: %s", e)

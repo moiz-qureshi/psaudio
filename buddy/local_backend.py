@@ -86,6 +86,20 @@ RECAP_Q = re.compile(
     r"watch\s+(?:that|this|me)|what\s*(?:'s|\s+is)\s+(?:going\s+on|happening)|look\s+at\s+(?:that|this|my|me)|"
     r"what\s+(?:do|can)\s+you\s+see|can\s+you\s+see|what\s*(?:'?s|\s+is)\s+on\s+(?:my|the)\s+screen|"
     r"what\s+am\s+i\s+(?:looking\s+at|seeing)|see\s+my\s+screen)\b", re.I)
+# "what did you say?" & co: say Hasaan's last line again, word for word (no model).
+# "what did you say about X" is a real question, so that one still goes to the model.
+REPEAT_Q = re.compile(
+    r"\b(what(?:\s+did|\s+d|'d)\s+you\s+(?:just\s+)?(?:say|said)|what\s+was\s+that\s+you\s+said|"
+    r"what\s+(?:did\s+)?you\s+just\s+sa(?:y|id)|say\s+(?:that|it)\s+again|come\s+again|"
+    r"repeat\s+(?:that|it|yourself|what\s+you\s+said)|(?:didn'?t|did\s+not)\s+(?:hear|catch)\s+(?:that|you|it))\b",
+    re.I)
+REPEAT_NOT = re.compile(r"\b(about|to\s+(?:him|her|them|me)|earlier|before|yesterday)\b", re.I)
+
+
+def wants_repeat(text):
+    return bool(REPEAT_Q.search(text or "")) and not REPEAT_NOT.search(text or "")
+
+
 # Whisper on laughter/noise can loop ("ahahahahah..." until it runs out of tokens): that is
 # both the nonsense question and the 5-20 s wait. Cap the decode and collapse the loops.
 CHAR_LOOP = re.compile(r"([a-z]{1,6}?)\1{3,}", re.I)                       # "ahahahahah"
@@ -420,8 +434,11 @@ def _wav_to_pcm24k(data):
 
 class LocalSession:
     def __init__(self, cfg, profile, history, on_stage, mcp=None, tools=None, on_tool=None, may_write=None,
-                 tool_hint="", context_fn=None, recap_fn=None, on_recap=None, game_fn=None, stats_fn=None):
+                 tool_hint="", context_fn=None, recap_fn=None, on_recap=None, game_fn=None, stats_fn=None,
+                 repeat_fn=None, speaker_fn=None):
         self.cfg, self.p = cfg, profile
+        self.repeat_fn = repeat_fn        # the last line Hasaan said (any path), for "what did you say?"
+        self.speaker_fn = speaker_fn      # returns voice-ID name for the current turn, or None
         self.loadouts = loadout.Loadouts()  # "what's the meta class?" -> wzmeta API, read out as-is
         self.game_fn = game_fn            # the game on the PS5 screen right now (scene watcher), or ""
         self.stats_fn = stats_fn          # this match / today, read off the HUD (scene watcher /stats)
@@ -799,6 +816,15 @@ class LocalSession:
         await self.out.put(_msg(input_transcription=NS(text=text)))
 
         roast = self.turn_mode.get("mode") == "roast"
+        # "Hey Hasaan, what did you say?": the same line again, word for word (a class
+        # read-out in progress handles its own "repeat that")
+        if not roast and not self.loadouts.active and self.repeat_fn and wants_repeat(text):
+            last = (self.repeat_fn() or "").strip()
+            if last:
+                self.on_stage("chat_turn_ms")
+                await self._say(last)
+                self.history.append((text, last))
+                return
         if not roast and await self._loadout_turn(text):
             return
         # tools only when they ask for them ("use your tools", "look it up", "check the app");
@@ -818,10 +844,15 @@ class LocalSession:
             if people_ctx:
                 msgs.insert(-1, {"role": "system", "content": people_ctx})
         me = self.cfg.get("owner_gamertag") or "Moiz"
+        voice_name = self.speaker_fn() if self.speaker_fn else None
         if self.turn_mode.get("source") == "squad":        # "Hey Hasaan" came from the party audio
-            who = (f"(This came from the party chat: one of {me}'s friends asked, not {me}. You can't "
-                   "tell which friend unless they say their name or it's obvious from what they said, so "
-                   "don't guess a gamertag: just talk to them as 'you'.)")
+            if voice_name:
+                who = (f"(Voice ID confirmed: the person speaking is {voice_name}. "
+                       f"Address them by name and talk to them as 'you'.)")
+            else:
+                who = (f"(This came from the party chat: one of {me}'s friends asked, not {me}. You can't "
+                       "tell which friend unless they say their name or it's obvious from what they said, so "
+                       "don't guess a gamertag: just talk to them as 'you'.)")
         else:
             who = f"({me} asked this on his headset. Talk to him as 'you'; don't say his name.)"
         msgs.insert(-1, {"role": "system", "content": who})

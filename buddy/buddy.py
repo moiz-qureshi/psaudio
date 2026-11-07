@@ -1202,7 +1202,8 @@ class Buddy:
                                               game_fn=lambda: str(((self.squad_mode.scene or {}).get("now")
                                                                    or {}).get("game") or ""),
                                               stats_fn=self.scene_stats,
-                                              repeat_fn=lambda: self.last_line)
+                                              repeat_fn=lambda: self.last_line,
+                                              speaker_fn=lambda: self._session_speaker)
         return client.aio.live.connect(model=p["model"], config=self.live_config())
 
     async def _session_loop(self):
@@ -1650,7 +1651,9 @@ class Buddy:
                         if name:
                             self._session_speaker = name
                             log.info("voice-id: identified %r (%.2f)", name, data.get("confidence", 0))
-                            if self.gen_active:
+                            # Gemini Live only: inject mid-turn via the audio stream queue.
+                            # LocalSession has no send_client_content — injecting would crash the sender.
+                            if self.gen_active and self.profile["kind"] == "gemini":
                                 self._queue(("text", f"[The person speaking is {name}]"))
         except Exception as e:
             log.debug("voice-id: %s", e)

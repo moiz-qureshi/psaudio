@@ -1528,8 +1528,7 @@ class Buddy:
                 return
         self.question, self.reply, self.chat_pos = "", "", 0
         self._voice_buf = []
-        if self._session_speaker and self.profile["kind"] == "gemini":
-            self._queue(("text", f"[The person speaking is {self._session_speaker}]"))
+        self._session_speaker = None  # reset each turn so we re-identify (party has many speakers)
         self.turn = {"press_ms": client_ms or now_ms(), "press_rx_ms": now_ms(),
                      "model": self.model_name(), "profile": self.profile["id"],
                      "connected_at_press": self.session_ready.is_set()}
@@ -1620,7 +1619,7 @@ class Buddy:
                 await self.set_state("error", self.error or "could not connect")
 
     async def _identify_speaker(self, raw_pcm: bytes) -> None:
-        """POST buffered PCM to CRCMZ voice-ID endpoint; cache speaker name for the session."""
+        """POST buffered PCM to CRCMZ voice-ID endpoint; identify per turn (party has many speakers)."""
         token = self.cfg.get("crcmz_token", "")
         if not token:
             return
@@ -1648,9 +1647,11 @@ class Buddy:
                     if r.status == 200:
                         data = await r.json()
                         name = data.get("name")
-                        if name and not self._session_speaker:
+                        if name:
                             self._session_speaker = name
                             log.info("voice-id: identified %r (%.2f)", name, data.get("confidence", 0))
+                            if self.profile["kind"] == "gemini" and self.gen_active:
+                                self._queue(("text", f"[The person speaking is {name}]"))
         except Exception as e:
             log.debug("voice-id: %s", e)
 

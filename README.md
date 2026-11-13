@@ -82,7 +82,7 @@ ssh -i ~/.ssh/id_ed25519_psaudio psaudio@psaudio.local "play airhorn"
 | Command | |
 |---|---|
 | `play <clip>` · `stop` | Play a clip into chat + headset / stop all clips |
-| `volume <0-100>` · `volume_up [n]` · `volume_down [n]` · `get_volume` | Soundboard volume |
+| `volume <0-150>` · `volume_up [n]` · `volume_down [n]` · `get_volume` | Soundboard volume (over 100 boosts clips in software) |
 | `mic_mute` · `mic_unmute` | Your mic to the console |
 | `mute` · `unmute` | Everything the console hears from the Pi |
 | `effect normal\|radio\|pitch_high\|pitch_low\|robot` | Live voice effect |

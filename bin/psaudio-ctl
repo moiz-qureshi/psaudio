@@ -55,7 +55,7 @@ case "$cmd" in
 
   volume)
     PCT=${arg1:-$DEFAULT_VOLUME}
-    [[ "$PCT" =~ ^[0-9]+$ ]] && [ "$PCT" -le 100 ] || { echo "Volume is 0-100"; exit 1; }
+    [[ "$PCT" =~ ^[0-9]+$ ]] && [ "$PCT" -le 150 ] || { echo "Volume is 0-150 (over 100 boosts clips)"; exit 1; }
     echo "$PCT" > "$STATE/soundboard-volume" || exit 1
     echo "$PCT"
     ;;
@@ -65,7 +65,7 @@ case "$cmd" in
     [[ "$STEP" =~ ^[0-9]+$ ]] || { echo "Step is a number"; exit 1; }
     CUR=$(volume_pct)
     if [ "$cmd" = volume_up ]; then NEW=$((CUR + STEP)); else NEW=$((CUR - STEP)); fi
-    [ $NEW -gt 100 ] && NEW=100
+    [ $NEW -gt 150 ] && NEW=150
     [ $NEW -lt 0 ] && NEW=0
     echo "$NEW" > "$STATE/soundboard-volume" || exit 1
     echo "$NEW"

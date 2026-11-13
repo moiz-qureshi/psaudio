@@ -34,8 +34,9 @@ def draw_panel(i, v):
     if i == 0:                                   # soundboard volume (knob 0)
         vol = v["vol"]
         s.panel(0, "SOUNDBOARD", "orange", "turn: volume  ·  tap: stop", glyph="speaker")
-        s.big(0, "--" if vol is None else f"{vol}%", "orange" if vol else u.DIM, y=26, size=44)
-        s.bar(0, (vol or 0) / 100, "orange", y=80)
+        boost = (vol or 0) > 100                 # 101-150 %: the Pi boosts clips, shown red
+        s.big(0, "--" if vol is None else f"{vol}%", "red" if boost else "orange" if vol else u.DIM, y=26, size=44)
+        s.bar(0, min(vol or 0, 150) / 150, "red" if boost else "orange", y=80)
     elif i == 1:                                 # Hasaan
         label, col = AI_LOOK.get(v["st"], (v["st"].upper(), "slate"))
         s.panel(0, "HASAAN", "cyan", "tap: next model", active=v["st"] != "offline", glyph="bot")

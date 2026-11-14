@@ -20,6 +20,17 @@ let ffmpeg = "/opt/homebrew/bin/ffmpeg"
 let httpPort: UInt16 = 8898
 let fps = 4
 
+let relayPath = support.appendingPathComponent("relay.sh").path
+let relayScript = """
+#!/bin/sh
+# Run by mediamtx when the PS5 goes live: copy app/<key> to "live" for the web viewer.
+SRC="rtsp://127.0.0.1:8554/$MTX_PATH"
+N=$(/opt/homebrew/bin/ffprobe -v error -rtsp_transport tcp -i "$SRC" -select_streams a -show_entries packet=pts_time -read_intervals %+4 -of csv=p=0 2>/dev/null | wc -l)
+if [ "$N" -gt 0 ]; then A="-map 0:a -c:a copy"; else A=""; fi
+exec /opt/homebrew/bin/ffmpeg -hide_banner -loglevel error -nostdin -rtsp_transport tcp -i "$SRC" -map 0:v -c:v copy $A -f rtsp -rtsp_transport tcp rtsp://127.0.0.1:8554/live
+
+"""
+
 let mtxConf = """
 logLevel: warn
 api: yes
@@ -29,14 +40,26 @@ rtmpAddress: :1935
 rtsp: yes
 rtspAddress: 127.0.0.1:8554
 rtspTransports: [tcp]
-hls: no
+hls: yes
+hlsAddress: :8888
+hlsVariant: lowLatency
+hlsSegmentDuration: 1s
+hlsPartDuration: 200ms
+hlsAlwaysRemux: yes
 webrtc: no
 srt: no
 metrics: no
 playback: no
 pprof: no
 paths:
+  # Public viewer (stream.crcmz.me on opti3 proxies only /live/ from :8888): the PS5's
+  # path is app/<stream key>, so relay.sh copies it (no re-encode) to a fixed name and the
+  # key never shows up in a URL. relay.sh drops the audio track when the PS5 sends none
+  # (it often doesn't): low-latency HLS never starts in a browser on an empty audio track.
+  live:
   all_others:
+    runOnReady: /bin/sh "\(relayPath)"
+    runOnReadyRestart: yes
 """
 
 func token() -> String {
@@ -59,6 +82,8 @@ final class Stream {
     func start() {
         try? FileManager.default.createDirectory(at: support, withIntermediateDirectories: true)
         try? mtxConf.write(toFile: mtxConfPath, atomically: true, encoding: .utf8)
+        try? relayScript.write(toFile: relayPath, atomically: true, encoding: .utf8)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: relayPath)
         startMediamtx()
         Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in self?.poll() }
         Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in self?.sampleMotion() }

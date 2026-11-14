@@ -15,6 +15,7 @@ Pi (squad mode) --GET /frame.jpg, /status--> MacBook :8898 (bearer token) -> Qwe
 |---|---|---|
 | DNS | opti3 `~/services/ps5-stream-dns` (copy in `opti3-dns/`) | `docker compose up -d`. Everything else is forwarded to the eero. |
 | Receiver app | MacBook `~/Applications/PS5 Stream.app`, LaunchAgent `me.crcmz.ps5stream` | build: `./build.sh` on the Mac. Menu bar `PS5 ●` = live. Needs `brew install mediamtx ffmpeg`. |
+| Public viewer | opti3 `~/services/stream-crcmz` → https://stream.crcmz.me | mediamtx copies the live path to `live` and serves LL-HLS on :8888; opti3 proxies it behind CRCMZ sign-in. |
 | Frames | `http://192.168.4.38:8898/frame.jpg`, `/status` (token in `~/Library/Application Support/PS5Stream/token`, on the Pi as `PS5_STREAM_TOKEN`) | `/health` is open; the stream key never leaves the Mac. |
 
 ## One-time setup

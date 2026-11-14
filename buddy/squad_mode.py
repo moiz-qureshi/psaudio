@@ -42,6 +42,7 @@ LEAVE_LINE = "Aight I'm out, bitches. Hit me up when you need me."
 NAME_RE = re.compile(r"\b(hasaan|hassan|hasan|husain|hussain|has an)\b", re.I)
 HALLUCINATION = re.compile(r"^\s*(thank you\.?|thanks for watching!?|you|bye\.?|\.+|subtitles? by.*|"
                            r"\[.*\]|\(.*\)|music|♪.*)\s*$", re.I)
+HESITATE = re.compile(r"^(?:(?:h+m+|u+h*m+|u+h+|e+r+m*|a+h+m+)[\s,.!?…-]+)+", re.I)   # "Hmm, ..." / "Uhh..."
 NOTABLE = re.compile(r"\b(spectat\w*|dead|died|eliminat\w*|knocked|down(ed)?|victory|won|win|winner|"
                      r"defeat|lost|game over|champion|squad wiped|respawn|lobby|paused?|menu|idle|afk|"
                      r"loading|scoreboard|kill ?cam|final circle|match end\w*)\b", re.I)
@@ -52,7 +53,7 @@ SQUAD MODE: you are in the party voice chat right now, always listening, like a 
 - You can see Moiz's PS5 screen: "Screen" gives what's on it right now and what happened recently (deaths, kills, spectating, frozen picture).
 - Decide if a real friend in this party would say something RIGHT NOW. Talk when: someone talks to you or asks something you can answer; there's a funny moment, a death, a clutch, a win or a loss; someone's AFK or being spectated doing nothing (roast them, tell the squad); a dead-quiet stretch where a quick joke fits. Otherwise answer with exactly: PASS
 - Talk to people as "you". Don't start lines with someone's gamertag or keep repeating names; name someone only when you call out a specific person. "Squad" lines are his friends: you can't tell which one unless they say a name, so don't guess.
-- When you talk: one or two short sentences, casual party-chat talk, no narrating the screen like a commentator, never repeat something you already said, never read out these notes. Only use scores, names and numbers that the notes or transcript actually show.
+- When you talk: get straight into it (no "Hmm", "Uh" or "So" first), one or two short sentences, casual party-chat talk, no narrating the screen like a commentator, never repeat something you already said, never read out these notes. Only use scores, names and numbers that the notes or transcript actually show.
 - You do hear the party and see the screen in this mode; ignore any earlier instruction that says you can't.
 """.strip()
 
@@ -437,11 +438,15 @@ class SquadMode:
         return f"{froze} {self.me} is still talking, so he's probably just in a menu. React only if it's funny."
 
     async def _decide(self, reason, unprompted):
+        asked = next((t for _, who, t, _ in reversed(self.lines) if not who.startswith("Hasaan")), "")
+        if reason == "addressed" and local_backend.wants_repeat(asked) and self.b.last_line:
+            # "Hasaan, what did you say?": the same line again, word for word
+            await self.say(self.b.last_line, why="repeat", heard=asked)
+            return
         self.deciding = True
         try:
             system = self.b.system_prompt() + "\n\n" + RULES.replace("Moiz", self.me)
             msgs = [{"role": "system", "content": system}, {"role": "user", "content": self._context(reason)}]
-            asked = next((t for _, who, t, _ in reversed(self.lines) if not who.startswith("Hasaan")), "")
             if reason in ("addressed", "question") and local_backend.RECAP_Q.search(asked):
                 msgs.insert(1, {"role": "system", "content": await self.b.scene_recap()})   # "what happened?"
             if reason in ("addressed", "question") and local_backend.STATS_Q.search(asked):
@@ -461,6 +466,7 @@ class SquadMode:
             self.deciding = False
         text = re.sub(r"^(hasaan|hassan)\s*:\s*", "", text, flags=re.I).strip().strip('"')
         text = re.sub(r"[\s.,;:!-]*\bPASS\b\W*$", "", text, flags=re.I).strip()     # "line... Pass." -> line
+        text = HESITATE.sub("", text).strip()                                       # no "Hmm," first: just talk
         if not text or re.fullmatch(r"\W*pass\W*", text, re.I) or text.upper().startswith("PASS"):
             self.stats["passed"] += 1
             return
@@ -508,6 +514,7 @@ class SquadMode:
                 pushed += len(held)
             self.stats["last_audio_s"] = round(pushed / (OUT_RATE * 2), 2)
             self.said.append(text)
+            self.b.last_line = text                                # "Hasaan, what did you say?"
             self.lines.append((time.monotonic(), "Hasaan (you)", text, True))
             self.stats["spoke"] += 1
             self.last_said = time.monotonic()

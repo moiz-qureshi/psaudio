@@ -297,6 +297,8 @@ class Player:
                  "--property=application.id=psaudio-buddy"],
                 stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 bufsize=0)
+            # never block the event loop on a pacat that stopped reading
+            os.set_blocking(self.procs[name].stdin.fileno(), False)
 
     def start(self):
         self._spawn()
@@ -398,7 +400,15 @@ class Player:
             for name, p in list(self.procs.items()):
                 data = (np.repeat(mono, 2) if name == "headset" else mono).tobytes()
                 try:
-                    p.stdin.write(data)
+                    n = p.stdin.write(data)
+                    if n is not None and n < len(data):
+                        raise BlockingIOError
+                except BlockingIOError:
+                    # we only ever write PLAY_LEAD_S ahead, so a full pipe means this
+                    # pacat is wedged (PipeWire stall, USB re-enumerate): replace it
+                    log.warning("pacat %s stopped reading; respawning it", name)
+                    p.kill()
+                    self.procs.pop(name, None)
                 except (BrokenPipeError, OSError):
                     self.procs.pop(name, None)
             self.written += len(frame)

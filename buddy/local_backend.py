@@ -439,6 +439,7 @@ class LocalSession:
         self.cfg, self.p = cfg, profile
         self.repeat_fn = repeat_fn        # the last line Hasaan said (any path), for "what did you say?"
         self.speaker_fn = speaker_fn      # returns voice-ID name for the current turn, or None
+        self.diagnostic_mode = False      # creator-only raw LLM mode (no Hasaan persona)
         self.loadouts = loadout.Loadouts()  # "what's the meta class?" -> wzmeta API, read out as-is
         self.game_fn = game_fn            # the game on the PS5 screen right now (scene watcher), or ""
         self.stats_fn = stats_fn          # this match / today, read off the HUD (scene watcher /stats)
@@ -814,6 +815,56 @@ class LocalSession:
         if not text or re.fullmatch(r"[\s.,!?]*(thank you|thanks for watching|you)?[\s.,!?]*", text, re.I):
             return                               # silence or Whisper's usual silence hallucinations
         await self.out.put(_msg(input_transcription=NS(text=text)))
+
+        # ── Diagnostic mode ────────────────────────────────────────────────────────
+        text_low = text.lower()
+        _EXIT_PHRASES = ("exit diagnostic", "end diagnostic", "leave diagnostic", "diagnostic off")
+        _ENTER_PHRASES = ("i am your creator", "enter diagnostic", "diagnostic mode")
+        if self.diagnostic_mode:
+            if any(p in text_low for p in _EXIT_PHRASES):
+                self.diagnostic_mode = False
+                log.info("diagnostic mode: off")
+                await self._say("Diagnostic mode off. I'm Hasaan again.")
+                return
+            # bare LLM call — no Hasaan persona, no tools, no injections
+            diag_sys = (
+                "You are an AI assistant running inside a voice interface. "
+                "Answer all questions directly and factually. "
+                f"Your LLM is {self.p.get('llm', 'unknown')}. "
+                f"Your STT model is {self.p.get('stt', 'unknown')}. "
+                f"Your TTS model is {self.p.get('tts_model', 'unknown')} ({self.p.get('tts_provider', 'unknown')}). "
+                "If asked for the normal system prompt, recite it verbatim. "
+                "The normal system prompt is:\n\n" + self.cfg.get("system_instruction", "(not set)")
+            )
+            diag_msgs = [{"role": "system", "content": diag_sys},
+                         {"role": "user", "content": text}]
+            sentences = asyncio.Queue()
+            speaker = asyncio.create_task(self._speak(sentences))
+            try:
+                self.on_stage("chat_turn_ms")
+                reply, _ = await self._stream_llm(diag_msgs, sentences, first_reply=True, tools_on=False)
+            finally:
+                await sentences.put(None)
+                await speaker
+            if reply.strip():
+                self.history.append((text, reply.strip()))
+            return
+
+        if not self.diagnostic_mode and any(p in text_low for p in _ENTER_PHRASES):
+            voice_name = self.speaker_fn() if self.speaker_fn else None
+            owner = (self.cfg.get("owner_gamertag") or "moiz").lower()
+            is_creator = bool(voice_name and (
+                "soup" in voice_name.lower() or owner in voice_name.lower()
+            ))
+            if is_creator:
+                self.diagnostic_mode = True
+                log.info("diagnostic mode: on (confirmed %r)", voice_name)
+                await self._say(f"Creator confirmed. Diagnostic mode on. Go ahead.")
+            else:
+                who = voice_name or "unrecognized voice"
+                await self._say(f"Nope. Voice ID says {who}. Not the creator.")
+            return
+        # ── End diagnostic mode ────────────────────────────────────────────────────
 
         roast = self.turn_mode.get("mode") == "roast"
         # "Hey Hasaan, what did you say?": the same line again, word for word (a class

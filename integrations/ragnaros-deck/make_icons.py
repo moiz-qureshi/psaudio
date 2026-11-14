@@ -74,6 +74,10 @@ ICONS = {
     # plain action keys
     "ui_studio":          ("LIGHT", "STUDIO", "bulb", "amber", True, None),
     "ui_hdmi":            ("TV INPUT", "HDMI", "hdmi", "violet", True, None),
+    # PS5 Stream on/off on the MacBook (bin/ps5stream toggle)
+    "ps5stream":          ("PS5", "STREAM", "power", "violet", True, None),
+    # restart psaudio-buddy on the Pi (bin/aibuddy restart)
+    "airestart":          ("HASAAN", "RESTART", "power", "amber", True, None),
 }
 
 if __name__ == "__main__":

@@ -574,7 +574,7 @@ def fullres():
             try:
                 full["proc"] = subprocess.Popen(
                     ["/opt/homebrew/bin/ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
-                     "-rtsp_transport", "tcp", "-hwaccel", "videotoolbox", "-i", f"rtsp://127.0.0.1:8554/{path}",
+                     "-rtsp_transport", "tcp", "-hwaccel", "videotoolbox", "-i", f"rtsp://127.0.0.1:18554/{path}",
                      "-an", "-vf", "fps=2", "-q:v", "3", "-f", "image2", "-update", "1", "-atomic_writing", "1",
                      str(FULL)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 full["error"] = None

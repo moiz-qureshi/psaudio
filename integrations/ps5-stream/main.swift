@@ -24,10 +24,10 @@ let relayPath = support.appendingPathComponent("relay.sh").path
 let relayScript = """
 #!/bin/sh
 # Run by mediamtx when the PS5 goes live: copy app/<key> to "live" for the web viewer.
-SRC="rtsp://127.0.0.1:8554/$MTX_PATH"
+SRC="rtsp://127.0.0.1:18554/$MTX_PATH"
 N=$(/opt/homebrew/bin/ffprobe -v error -rtsp_transport tcp -i "$SRC" -select_streams a -show_entries packet=pts_time -read_intervals %+4 -of csv=p=0 2>/dev/null | wc -l)
 if [ "$N" -gt 0 ]; then A="-map 0:a -c:a copy"; else A=""; fi
-exec /opt/homebrew/bin/ffmpeg -hide_banner -loglevel error -nostdin -rtsp_transport tcp -i "$SRC" -map 0:v -c:v copy $A -f rtsp -rtsp_transport tcp rtsp://127.0.0.1:8554/live
+exec /opt/homebrew/bin/ffmpeg -hide_banner -loglevel error -nostdin -rtsp_transport tcp -i "$SRC" -map 0:v -c:v copy $A -f rtsp -rtsp_transport tcp rtsp://127.0.0.1:18554/live
 
 """
 
@@ -38,7 +38,7 @@ apiAddress: 127.0.0.1:9997
 rtmp: yes
 rtmpAddress: :1935
 rtsp: yes
-rtspAddress: 127.0.0.1:8554
+rtspAddress: 127.0.0.1:18554   # not 8554: the Android emulator takes that for gRPC
 rtspTransports: [tcp]
 hls: yes
 hlsAddress: :8888
@@ -129,7 +129,7 @@ final class Stream {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: ffmpeg)
         p.arguments = ["-hide_banner", "-y", "-nostdin", "-loglevel", "error", "-fflags", "nobuffer", "-flags", "low_delay",
-                       "-rtsp_transport", "tcp", "-i", "rtsp://127.0.0.1:8554/\(path)", "-an",
+                       "-rtsp_transport", "tcp", "-i", "rtsp://127.0.0.1:18554/\(path)", "-an",
                        "-vf", "fps=\(fps),scale=768:-2", "-q:v", "5",
                        "-f", "image2", "-update", "1", "-atomic_writing", "1", framePath]
         p.standardOutput = FileHandle.nullDevice
